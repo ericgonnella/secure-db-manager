@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    secure_db_manager_lib::run()
+    baseport_lib::run()
 }

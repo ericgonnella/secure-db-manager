@@ -8,7 +8,7 @@ use tokio::process::Command as TokioCommand;
 
 // ── Secret storage (OS keyring) ────────────────────────────────────────────
 
-pub(crate) const KEYRING_SERVICE: &str = "com.ericg.secure-db-manager";
+pub(crate) const KEYRING_SERVICE: &str = "com.ericg.baseport";
 
 pub(crate) fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYRING_SERVICE, account)
@@ -390,8 +390,8 @@ pub async fn create_local_instance(
         return Err("Instance name must contain at least one alphanumeric character.".into());
     }
 
-    let container_name = format!("sdm_{}_{}", slug, input.service_type);
-    let volume_name = format!("sdm_{}_{}_data", slug, input.service_type);
+    let container_name = format!("bp_{}_{}", slug, input.service_type);
+    let volume_name = format!("bp_{}_{}_data", slug, input.service_type);
     let port_bind = format!("127.0.0.1:{}:{}", input.port, cfg.container_port);
 
     // ── Create the volume ──────────────────────────────────────────────────
@@ -670,6 +670,9 @@ pub async fn start_local_instance(
 
     store.instances[pos].status = "running".into();
     save_store(&app, &store)?;
+
+    // Auto-reprovision any cloudflare tunnels that were paused when this instance was stopped.
+    crate::commands::exposure::reprovision_cloudflare_exposures_inner(&app, &instance_id).await;
 
     append_audit_event(&app, AuditEvent {
         id: uuid_v4(),

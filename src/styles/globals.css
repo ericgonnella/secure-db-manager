@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Indeterminate progress bar animation used by the cloudflared installer */
+@keyframes slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
 @layer base {
   :root {
     --background: 0 0% 98%;

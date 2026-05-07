@@ -54,6 +54,8 @@ pub fn run() {
             commands::exposure::check_tool_available,
             commands::exposure::download_and_install_tool,
             commands::exposure::add_firewall_rule,
+            commands::exposure::reprovision_cloudflare_exposures,
+            commands::exposure::regenerate_cloudflare_exposure,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

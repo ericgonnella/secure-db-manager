@@ -33,6 +33,15 @@ export default {
         sans: ["Inter", "Geist Sans", "system-ui", "sans-serif"],
         mono: ["JetBrains Mono", "Geist Mono", "Fira Code", "monospace"],
       },
+      keyframes: {
+        slide: {
+          "0%": { transform: "translateX(-100%)" },
+          "100%": { transform: "translateX(400%)" },
+        },
+      },
+      animation: {
+        slide: "slide 1.2s ease-in-out infinite",
+      },
     },
   },
   plugins: [],

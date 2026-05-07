@@ -526,8 +526,8 @@ function StepReview({ state }: { state: WizardState }) {
   const rows: [string, string][] = [
     ["Service", `${service.label} ${state.version}`],
     ["Environment", state.environment],
-    ["Container", `sdm_${slug}_${service.id}`],
-    ["Volume", `sdm_${slug}_${service.id}_data`],
+    ["Container", `bp_${slug}_${service.id}`],
+    ["Volume", `bp_${slug}_${service.id}_data`],
     ["Host port", `127.0.0.1:${port}`],
   ];
   if (service.hasDatabase) rows.push(["Database", state.dbName]);

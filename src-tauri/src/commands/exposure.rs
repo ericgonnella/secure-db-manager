@@ -4,7 +4,7 @@ use crate::local_store::{
 };
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::Command as TokioCommand;
 
 // ── Step preview types ─────────────────────────────────────────────────────
@@ -174,7 +174,7 @@ fn binary_on_path(name: &str) -> bool {
 
 // ── Tool management ────────────────────────────────────────────────────────
 
-/// Returns `~/.sdm/bin` (Windows: `%APPDATA%\.sdm\bin`), creating it if needed.
+/// Returns `~/.baseport/bin` (Windows: `%APPDATA%\.baseport\bin`), creating it if needed.
 fn app_bin_dir() -> Result<std::path::PathBuf, String> {
     let base = if cfg!(target_os = "windows") {
         std::env::var("APPDATA")
@@ -186,12 +186,12 @@ fn app_bin_dir() -> Result<std::path::PathBuf, String> {
     if base.is_empty() {
         return Err("Cannot determine home directory.".into());
     }
-    let dir = std::path::PathBuf::from(&base).join(".sdm").join("bin");
+    let dir = std::path::PathBuf::from(&base).join(".baseport").join("bin");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create tool directory: {e}"))?;
     Ok(dir)
 }
 
-/// Check PATH first, then `~/.sdm/bin`. Returns the path to use in Command::new.
+/// Check PATH first, then `~/.baseport/bin`. Returns the path to use in Command::new.
 fn find_binary(name: &str) -> Option<String> {
     if binary_on_path(name) {
         return Some(name.to_string());
@@ -230,23 +230,75 @@ fn cloudflared_download_url() -> (&'static str, &'static str) {
     }
 }
 
-async fn download_file(url: &str, dest: &std::path::Path) -> Result<(), String> {
+// Progress event payload emitted during binary downloads.
+#[derive(Debug, Serialize, Clone)]
+struct DownloadProgress {
+    tool: String,
+    /// Bytes downloaded so far (polled from the destination file size).
+    downloaded: u64,
+    /// Phase: "downloading" | "complete" | "error"
+    phase: String,
+    message: String,
+}
+
+async fn download_file_with_progress(
+    app: &AppHandle,
+    tool: &str,
+    url: &str,
+    dest: &std::path::Path,
+) -> Result<(), String> {
     let dest_str = dest.to_string_lossy().to_string();
-    if cfg!(target_os = "windows") {
-        let script = format!(
-            "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
-             Invoke-WebRequest -Uri '{url}' -OutFile '{dest_str}' -UseBasicParsing"
-        );
-        let out = TokioCommand::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+
+    // Emit "starting" event so the frontend can show an animated bar immediately.
+    let _ = app.emit(
+        "tool-download-progress",
+        DownloadProgress {
+            tool: tool.to_string(),
+            downloaded: 0,
+            phase: "downloading".into(),
+            message: format!("Connecting to download server…"),
+        },
+    );
+
+    // Spawn a side-task that polls the partially-written destination file
+    // every 400ms and emits progress events until the main download finishes.
+    let dest_clone = dest.to_path_buf();
+    let app_clone = app.clone();
+    let tool_clone = tool.to_string();
+    let poller = tokio::task::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(400));
+        loop {
+            interval.tick().await;
+            let downloaded = std::fs::metadata(&dest_clone)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let mb = downloaded / (1024 * 1024);
+            let _ = app_clone.emit(
+                "tool-download-progress",
+                DownloadProgress {
+                    tool: tool_clone.clone(),
+                    downloaded,
+                    phase: "downloading".into(),
+                    message: format!("Downloading… {mb} MB received"),
+                },
+            );
+        }
+    });
+
+    let result = if cfg!(target_os = "windows") {
+        // curl.exe ships with Windows 10 1803+; use it for consistent behaviour.
+        let out = TokioCommand::new("curl")
+            .args(["-fL", "--silent", "--output", &dest_str, url])
             .output()
             .await
-            .map_err(|e| format!("PowerShell download failed to launch: {e}"))?;
+            .map_err(|e| format!("curl download failed to launch: {e}"))?;
         if !out.status.success() {
-            return Err(format!(
+            Err(format!(
                 "Download failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
-            ));
+            ))
+        } else {
+            Ok(())
         }
     } else {
         let out = TokioCommand::new("curl")
@@ -255,13 +307,35 @@ async fn download_file(url: &str, dest: &std::path::Path) -> Result<(), String> 
             .await
             .map_err(|e| format!("curl download failed to launch: {e}"))?;
         if !out.status.success() {
-            return Err(format!(
+            Err(format!(
                 "Download failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
-            ));
+            ))
+        } else {
+            Ok(())
         }
-    }
-    Ok(())
+    };
+
+    poller.abort();
+
+    let final_size = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    let (phase, message) = if result.is_ok() {
+        let mb = final_size / (1024 * 1024);
+        ("complete".to_string(), format!("Download complete — {mb} MB"))
+    } else {
+        ("error".to_string(), result.as_ref().err().cloned().unwrap_or_default())
+    };
+    let _ = app.emit(
+        "tool-download-progress",
+        DownloadProgress {
+            tool: tool.to_string(),
+            downloaded: final_size,
+            phase,
+            message,
+        },
+    );
+
+    result
 }
 
 #[derive(Debug, Serialize)]
@@ -288,13 +362,13 @@ pub async fn check_tool_available(tool: String) -> Result<ToolStatus, String> {
 }
 
 #[tauri::command]
-pub async fn download_and_install_tool(tool: String) -> Result<String, String> {
+pub async fn download_and_install_tool(app: AppHandle, tool: String) -> Result<String, String> {
     match tool.as_str() {
         "cloudflared" => {
             let (url, filename) = cloudflared_download_url();
             let bin_dir = app_bin_dir()?;
             let dest = bin_dir.join(filename);
-            download_file(url, &dest).await?;
+            download_file_with_progress(&app, "cloudflared", url, &dest).await?;
             // Mark executable on non-Windows
             #[cfg(not(target_os = "windows"))]
             {
@@ -510,8 +584,23 @@ pub(crate) async fn teardown_exposures_for_instance(app: &AppHandle, instance_id
         if let Some(ref rule) = exposure.firewall_rule_name {
             delete_firewall_rule_os(rule).await;
         }
-        // Remove the store record so the UI doesn't show a stale exposure.
-        let _ = remove_exposure_record(app, &exposure.id);
+        // Cloudflare tunnels get a new random URL on every start.
+        // Instead of deleting the record, mark it "pending" so the next
+        // instance start can auto-reprovision the tunnel.
+        if exposure.method == "cloudflare" {
+            let mut store = load_store(app);
+            if let Some(exp) = store.exposures.iter_mut().find(|e| e.id == exposure.id) {
+                exp.status = "pending".to_string();
+                exp.external_endpoint = None;
+                exp.pid = None;
+                exp.error = None;
+                exp.updated_at = now();
+            }
+            let _ = save_store(app, &store);
+        } else {
+            // Remove the store record so the UI doesn't show a stale exposure.
+            let _ = remove_exposure_record(app, &exposure.id);
+        }
     }
 }
 
@@ -524,7 +613,7 @@ fn nginx_work_dir(exposure_id: &str) -> std::path::PathBuf {
         std::env::var("HOME")
             .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string())
     };
-    std::path::PathBuf::from(base).join(".sdm").join("nginx").join(exposure_id)
+    std::path::PathBuf::from(base).join(".baseport").join("nginx").join(exposure_id)
 }
 
 /// Docker on Windows expects forward-slash volume paths.
@@ -537,7 +626,7 @@ fn docker_vol_path(p: &std::path::Path) -> String {
 }
 
 fn nginx_container_name(exposure_id: &str) -> String {
-    format!("sdm_nginx_{}", exposure_id.trim_start_matches("expose_"))
+    format!("bp_nginx_{}", exposure_id.trim_start_matches("expose_"))
 }
 
 // ── Preview builders ───────────────────────────────────────────────────────
@@ -859,11 +948,11 @@ pub async fn remove_exposure(app: AppHandle, exposure_id: String) -> Result<(), 
 const SOCAT_IMAGE: &str = "alpine/socat:latest";
 
 fn direct_network_name(exposure_id: &str) -> String {
-    format!("sdm_expose_{}", exposure_id.trim_start_matches("expose_"))
+    format!("bp_expose_{}", exposure_id.trim_start_matches("expose_"))
 }
 
 fn direct_container_name(exposure_id: &str) -> String {
-    format!("sdm_proxy_{}", exposure_id.trim_start_matches("expose_"))
+    format!("bp_proxy_{}", exposure_id.trim_start_matches("expose_"))
 }
 
 async fn create_direct(
@@ -1012,21 +1101,21 @@ fn container_internal_port(service_type: &str) -> u16 {
 
 // ── Cloudflare quick tunnel ────────────────────────────────────────────────
 
-async fn create_cloudflare(
+/// Inner logic: spawn a cloudflared process for `exposure_id` and return the
+/// public URL. Stores the child handle in `AppState.exposure_children`.
+async fn spawn_cloudflare_tunnel(
     app: &AppHandle,
-    _req: &ExposureRequest,
+    exposure_id: &str,
     instance: &LocalInstance,
-) -> Result<Exposure, String> {
+) -> Result<String, String> {
     let cloudflared_bin = find_binary("cloudflared").ok_or_else(|| {
         "cloudflared is not installed. Use the Install button in the wizard to download it \
          automatically, or visit https://github.com/cloudflare/cloudflared/releases"
             .to_string()
     })?;
 
-    let exposure_id = format!("expose_{}", uuid_v4());
     let url = format!("http://localhost:{}", instance.port);
 
-    // Spawn cloudflared. We capture stdout+stderr so we can scrape the public URL.
     let mut child = Command::new(&cloudflared_bin)
         .args(["tunnel", "--no-autoupdate", "--url", &url])
         .stdout(Stdio::piped())
@@ -1034,38 +1123,18 @@ async fn create_cloudflare(
         .spawn()
         .map_err(|e| format!("Failed to launch cloudflared: {e}"))?;
 
-    let pid = child.id();
-
     // Read stderr (cloudflared prints the public URL to stderr) for up to 20s.
     let public_url = read_url_from_child_stderr(&mut child, "trycloudflare.com", 20).await;
 
     match public_url {
         Some(url) => {
-            // Stash the child handle so we can kill it later.
             let state = app.state::<crate::AppState>();
             state
                 .exposure_children
                 .lock()
                 .unwrap()
-                .insert(exposure_id.clone(), child);
-
-            let exposure = Exposure {
-                id: exposure_id,
-                instance_id: instance.id.clone(),
-                method: "cloudflare".into(),
-                status: "active".into(),
-                external_endpoint: Some(url),
-                external_port: None,
-                provider_id: None,
-                pid: Some(pid),
-                hostname: None,
-                error: None,
-                firewall_rule_name: None,
-                created_at: now(),
-                updated_at: now(),
-            };
-            save_exposure(app, &exposure)?;
-            Ok(exposure)
+                .insert(exposure_id.to_string(), child);
+            Ok(url)
         }
         None => {
             let _ = child.kill();
@@ -1074,6 +1143,160 @@ async fn create_cloudflare(
                  Check that the service is actually listening locally."
                     .into(),
             )
+        }
+    }
+}
+
+async fn create_cloudflare(
+    app: &AppHandle,
+    _req: &ExposureRequest,
+    instance: &LocalInstance,
+) -> Result<Exposure, String> {
+    let exposure_id = format!("expose_{}", uuid_v4());
+
+    let public_url = spawn_cloudflare_tunnel(app, &exposure_id, instance).await?;
+
+    let exposure = Exposure {
+        id: exposure_id,
+        instance_id: instance.id.clone(),
+        method: "cloudflare".into(),
+        status: "active".into(),
+        external_endpoint: Some(public_url),
+        external_port: None,
+        provider_id: None,
+        pid: None,
+        hostname: None,
+        error: None,
+        firewall_rule_name: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    save_exposure(app, &exposure)?;
+    Ok(exposure)
+}
+
+/// Re-spawn cloudflare tunnels for any "pending" cloudflare exposures belonging
+/// to `instance_id`. Called automatically after `start_local_instance` and as
+/// a manual trigger from the frontend when the exposures page loads.
+pub(crate) async fn reprovision_cloudflare_exposures_inner(
+    app: &AppHandle,
+    instance_id: &str,
+) -> Vec<Exposure> {
+    let store = load_store(app);
+    let pending: Vec<crate::local_store::Exposure> = store
+        .exposures
+        .iter()
+        .filter(|e| {
+            e.instance_id == instance_id
+                && e.method == "cloudflare"
+                && e.status == "pending"
+        })
+        .cloned()
+        .collect();
+
+    let mut results = Vec::new();
+    for mut exposure in pending {
+        let instance = match find_instance(app, &exposure.instance_id) {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+
+        match spawn_cloudflare_tunnel(app, &exposure.id, &instance).await {
+            Ok(endpoint) => {
+                let mut store = load_store(app);
+                if let Some(exp) = store.exposures.iter_mut().find(|e| e.id == exposure.id) {
+                    exp.status = "active".to_string();
+                    exp.external_endpoint = Some(endpoint.clone());
+                    exp.error = None;
+                    exp.updated_at = now();
+                }
+                let _ = save_store(app, &store);
+                exposure.status = "active".to_string();
+                exposure.external_endpoint = Some(endpoint);
+                results.push(exposure);
+            }
+            Err(e) => {
+                let mut store = load_store(app);
+                if let Some(exp) = store.exposures.iter_mut().find(|e| e.id == exposure.id) {
+                    exp.status = "error".to_string();
+                    exp.error = Some(e.clone());
+                    exp.updated_at = now();
+                }
+                let _ = save_store(app, &store);
+            }
+        }
+    }
+    results
+}
+
+#[tauri::command]
+pub async fn reprovision_cloudflare_exposures(
+    app: AppHandle,
+    instance_id: String,
+) -> Result<Vec<Exposure>, String> {
+    Ok(reprovision_cloudflare_exposures_inner(&app, &instance_id).await)
+}
+
+/// Kill the running cloudflared tunnel for `exposure_id` (if any) and spawn a
+/// fresh one. Works regardless of the current exposure status. Returns the
+/// updated `Exposure`.
+#[tauri::command]
+pub async fn regenerate_cloudflare_exposure(
+    app: AppHandle,
+    exposure_id: String,
+) -> Result<Exposure, String> {
+    // Kill the old child process if it's still tracked.
+    {
+        let state = app.state::<crate::AppState>();
+        let child_opt = state
+            .exposure_children
+            .lock()
+            .unwrap()
+            .remove(&exposure_id);
+        if let Some(mut child) = child_opt {
+            let _ = child.kill();
+        }
+    };
+
+    // Look up the exposure record.
+    let store = load_store(&app);
+    let exposure = store
+        .exposures
+        .iter()
+        .find(|e| e.id == exposure_id)
+        .cloned()
+        .ok_or_else(|| format!("Exposure '{exposure_id}' not found"))?;
+
+    let instance = find_instance(&app, &exposure.instance_id)?;
+
+    // Spawn a fresh tunnel.
+    match spawn_cloudflare_tunnel(&app, &exposure_id, &instance).await {
+        Ok(endpoint) => {
+            let mut store = load_store(&app);
+            if let Some(exp) = store.exposures.iter_mut().find(|e| e.id == exposure_id) {
+                exp.status = "active".to_string();
+                exp.external_endpoint = Some(endpoint.clone());
+                exp.error = None;
+                exp.updated_at = now();
+            }
+            save_store(&app, &store)?;
+            let updated = store
+                .exposures
+                .iter()
+                .find(|e| e.id == exposure_id)
+                .cloned()
+                .unwrap();
+            Ok(updated)
+        }
+        Err(e) => {
+            let mut store = load_store(&app);
+            if let Some(exp) = store.exposures.iter_mut().find(|e| e.id == exposure_id) {
+                exp.status = "error".to_string();
+                exp.error = Some(e.clone());
+                exp.updated_at = now();
+            }
+            let _ = save_store(&app, &store);
+            Err(e)
         }
     }
 }

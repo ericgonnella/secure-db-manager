@@ -14,12 +14,12 @@ function applyTheme(theme: Theme) {
   const root = document.documentElement;
   const resolved = theme === "system" ? getSystemTheme() : theme;
   root.classList.toggle("dark", resolved === "dark");
-  localStorage.setItem("sdm-theme", theme);
+  localStorage.setItem("bp-theme", theme);
 }
 
 export function useTheme() {
   const [theme, setThemeState] = useState<Theme>(() => {
-    const stored = localStorage.getItem("sdm-theme") as Theme | null;
+    const stored = localStorage.getItem("bp-theme") as Theme | null;
     return stored ?? "system";
   });
 

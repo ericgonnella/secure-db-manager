@@ -386,3 +386,15 @@ export async function addFirewallRule(
 ): Promise<FirewallResult> {
   return invoke<FirewallResult>("add_firewall_rule", { port, ruleName, exposureId: exposureId ?? null });
 }
+
+export async function reprovisionCloudflareExposures(
+  instanceId: string,
+): Promise<Exposure[]> {
+  return invoke<Exposure[]>("reprovision_cloudflare_exposures", { instanceId });
+}
+
+export async function regenerateCloudflareExposure(
+  exposureId: string,
+): Promise<Exposure> {
+  return invoke<Exposure>("regenerate_cloudflare_exposure", { exposureId });
+}

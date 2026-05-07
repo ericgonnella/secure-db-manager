@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { listen } from "@tauri-apps/api/event";
 import {
   X,
   Globe,
@@ -13,6 +14,8 @@ import {
   Download,
   ExternalLink,
   ShieldCheck,
+  Copy,
+  Check,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -92,6 +95,41 @@ export function ExposeWizard({ instance, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [firewallResult, setFirewallResult] = useState<string | null>(null);
 
+  // Download progress tracking (cloudflared installer)
+  const [downloadPhase, setDownloadPhase] = useState<"idle" | "downloading" | "complete" | "error">("idle");
+  const [downloadMessage, setDownloadMessage] = useState("");
+  const [downloadedBytes, setDownloadedBytes] = useState(0);
+  const unlistenRef = useRef<(() => void) | null>(null);
+
+  // Custom URL dialog (replaces alert())
+  const [liveUrl, setLiveUrl] = useState<string | null>(null);
+  const [urlCopied, setUrlCopied] = useState(false);
+
+  useEffect(() => {
+    // Subscribe to download progress events from the Rust backend.
+    let active = true;
+    listen<{ tool: string; downloaded: number; phase: string; message: string }>(
+      "tool-download-progress",
+      (event) => {
+        if (!active) return;
+        const { tool, downloaded, phase, message } = event.payload;
+        if (tool !== "cloudflared") return;
+        setDownloadedBytes(downloaded);
+        setDownloadMessage(message);
+        if (phase === "downloading") setDownloadPhase("downloading");
+        else if (phase === "complete") setDownloadPhase("complete");
+        else if (phase === "error") setDownloadPhase("error");
+      },
+    ).then((unlisten) => {
+      if (active) unlistenRef.current = unlisten;
+      else unlisten();
+    });
+    return () => {
+      active = false;
+      unlistenRef.current?.();
+    };
+  }, []);
+
   const selectedMethod = useMemo(
     () => METHODS.find((m) => m.id === method),
     [method]
@@ -110,11 +148,19 @@ export function ExposeWizard({ instance, onClose }: Props) {
 
   const installMutation = useMutation({
     mutationFn: () => downloadAndInstallTool(toolName!),
+    onMutate: () => {
+      setDownloadPhase("downloading");
+      setDownloadMessage("Starting download…");
+      setDownloadedBytes(0);
+    },
     onSuccess: () => {
       // Invalidate so toolQuery re-runs
       queryClient.invalidateQueries({ queryKey: ["tool-available", toolName] });
     },
-    onError: (err) => setError(String(err)),
+    onError: (err) => {
+      setDownloadPhase("error");
+      setError(String(err));
+    },
   });
 
   const firewallMutation = useMutation({
@@ -123,7 +169,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
         (method === "direct" || method === "nginx")
           ? Number(externalPort)
           : createdExposure?.external_port ?? 0;
-      const ruleName = `SDM ${instance.name} port ${port}`;
+      const ruleName = `Baseport ${instance.name} port ${port}`;
       return addFirewallRule(port, ruleName, createdExposure?.id);
     },
     onSuccess: (result) => {
@@ -176,7 +222,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
       } else {
         onClose();
         const target = exposure.external_endpoint ?? "(no endpoint reported)";
-        alert(`Exposure live at: ${target}`);
+        setLiveUrl(target);
       }
     },
     onError: (err) => setError(String(err)),
@@ -185,6 +231,82 @@ export function ExposeWizard({ instance, onClose }: Props) {
   useEffect(() => {
     setError(null);
   }, [step]);
+
+  // ── Live URL dialog (replaces native alert) ────────────────────────────
+  if (liveUrl) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6 backdrop-blur-sm">
+        <div className="w-full max-w-md rounded-xl border border-border bg-card shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-5 py-4">
+            <div className="flex items-center gap-2">
+              <CheckCircle className="h-4 w-4 text-emerald-500" />
+              <h2 className="text-sm font-semibold text-foreground">
+                Exposure is live
+              </h2>
+            </div>
+            <button
+              onClick={onClose}
+              className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="space-y-4 px-5 py-5">
+            <p className="text-xs text-muted-foreground">
+              Your database is now publicly accessible at the URL below. You
+              can select and copy the text directly.
+            </p>
+            <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2">
+              <code
+                className="min-w-0 flex-1 break-all font-mono text-xs text-foreground"
+                style={{ userSelect: "text" }}
+              >
+                {liveUrl}
+              </code>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(liveUrl).catch(() => {});
+                  setUrlCopied(true);
+                  setTimeout(() => setUrlCopied(false), 1500);
+                }}
+                className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="Copy URL"
+              >
+                {urlCopied ? (
+                  <Check className="h-3.5 w-3.5 text-emerald-500" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5" />
+                )}
+              </button>
+              {liveUrl.startsWith("http") && (
+                <a
+                  href={liveUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  title="Open in browser"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </a>
+              )}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              The Cloudflare URL is temporary and will change if the tunnel is
+              restarted. Check the Exposures tab to see the current URL.
+            </p>
+          </div>
+          <div className="flex justify-end border-t border-border px-5 py-3">
+            <button
+              onClick={onClose}
+              className="rounded-md bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-6 backdrop-blur-sm">
@@ -322,17 +444,41 @@ export function ExposeWizard({ instance, onClose }: Props) {
                     "flex items-start gap-2.5 rounded-md border px-3 py-2.5 text-xs",
                     toolAvailable
                       ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-400"
+                      : downloadPhase === "complete"
+                      ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-400"
+                      : downloadPhase === "error"
+                      ? "border-red-500/30 bg-red-500/5 text-red-700 dark:text-red-400"
                       : "border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-400"
                   )}
                 >
-                  {toolAvailable ? (
+                  {toolAvailable || downloadPhase === "complete" ? (
                     <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   ) : (
                     <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   )}
-                  <div className="flex-1">
+                  <div className="flex-1 space-y-2">
                     {toolAvailable ? (
                       <span><strong>{toolName}</strong> is installed and ready.</span>
+                    ) : downloadPhase === "downloading" ? (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium">Installing {toolName}…</span>
+                          <span className="tabular-nums text-[10px]">
+                            {downloadedBytes > 0
+                              ? `${(downloadedBytes / (1024 * 1024)).toFixed(1)} MB`
+                              : "starting"}
+                          </span>
+                        </div>
+                        {/* Animated indeterminate progress bar */}
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-amber-500/20">
+                          <div className="h-full w-1/3 animate-[slide_1.2s_ease-in-out_infinite] rounded-full bg-amber-500" />
+                        </div>
+                        <p className="text-[11px] opacity-80">{downloadMessage}</p>
+                      </>
+                    ) : downloadPhase === "complete" ? (
+                      <span><strong>{toolName}</strong> installed successfully. Ready to use.</span>
+                    ) : downloadPhase === "error" ? (
+                      <span>Installation failed. Check your connection and try again.</span>
                     ) : (
                       <>
                         <span>
@@ -349,7 +495,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
                               className="flex items-center gap-1.5 rounded-md bg-amber-500 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-amber-600 disabled:opacity-60"
                             >
                               <Download className="h-3 w-3" />
-                              {installMutation.isPending ? "Downloading…" : "Install cloudflared"}
+                              Install cloudflared
                             </button>
                           ) : (
                             <a

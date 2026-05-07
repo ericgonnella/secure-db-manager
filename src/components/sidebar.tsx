@@ -31,7 +31,7 @@ export function Sidebar() {
           <ShieldCheck className="h-4 w-4 text-primary-foreground" />
         </div>
         <span className="text-sm font-semibold tracking-tight text-foreground">
-          Secure DB Manager
+          Baseport
         </span>
       </div>
 

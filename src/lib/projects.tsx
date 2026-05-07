@@ -25,8 +25,8 @@ interface ProjectsContext {
 // ── Defaults ──────────────────────────────────────────────────────────────
 
 const DEFAULT_PROJECT: Project = { id: "default", name: "Default Project" };
-const STORAGE_KEY_PROJECTS = "sdm-projects";
-const STORAGE_KEY_CURRENT = "sdm-current-project";
+const STORAGE_KEY_PROJECTS = "bp-projects";
+const STORAGE_KEY_CURRENT = "bp-current-project";
 
 function loadProjects(): Project[] {
   try {

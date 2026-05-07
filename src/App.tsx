@@ -25,7 +25,7 @@ const queryClient = new QueryClient({
 
 // Apply persisted theme before first render
 function initTheme() {
-  const stored = localStorage.getItem("sdm-theme") ?? "system";
+  const stored = localStorage.getItem("bp-theme") ?? "system";
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   const isDark =
     stored === "dark" || (stored === "system" && prefersDark);

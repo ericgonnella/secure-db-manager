@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Network,
@@ -11,11 +11,14 @@ import {
   Check,
   Server,
   ExternalLink,
+  RefreshCw,
 } from "lucide-react";
 import {
   listExposures,
   listLocalInstances,
   removeExposure,
+  reprovisionCloudflareExposures,
+  regenerateCloudflareExposure,
   type Exposure,
   type LocalInstance,
 } from "@/lib/tauri";
@@ -36,7 +39,10 @@ function methodMeta(method: string) {
   }
 }
 
-function statusColor(status: string) {
+function statusColor(status: string, method?: string) {
+  if (status === "pending" && method === "cloudflare") {
+    return "text-amber-600 bg-amber-500/10 dark:text-amber-400";
+  }
   switch (status) {
     case "active":
       return "text-emerald-500 bg-emerald-500/10";
@@ -86,6 +92,13 @@ function ExposureRow({
     },
   });
 
+  const regenerateMutation = useMutation({
+    mutationFn: () => regenerateCloudflareExposure(exposure.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["exposures"] });
+    },
+  });
+
   const endpoint = exposure.external_endpoint ?? "(pending)";
 
   return (
@@ -106,11 +119,18 @@ function ExposureRow({
           </span>
           <span
             className={cn(
-              "rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-              statusColor(exposure.status)
+              "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+              statusColor(exposure.status, exposure.method)
             )}
           >
-            {exposure.status}
+            {exposure.status === "pending" && exposure.method === "cloudflare" ? (
+              <>
+                <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                Reconnecting
+              </>
+            ) : (
+              exposure.status
+            )}
           </span>
           <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
             {meta.label}
@@ -125,6 +145,14 @@ function ExposureRow({
         {exposure.error && (
           <p className="mt-1 text-xs text-red-500">{exposure.error}</p>
         )}
+        {regenerateMutation.isError && (
+          <p className="mt-1 text-xs text-red-500">
+            Regenerate failed: {String(regenerateMutation.error)}
+          </p>
+        )}
+        {regenerateMutation.isPending && (
+          <p className="mt-1 text-xs text-orange-500">Getting a new Cloudflare URL…</p>
+        )}
       </div>
 
       <div className="flex items-center gap-1">
@@ -138,6 +166,21 @@ function ExposureRow({
           >
             <ExternalLink className="h-3.5 w-3.5" />
           </a>
+        )}
+        {exposure.method === "cloudflare" && (
+          <button
+            onClick={() => regenerateMutation.mutate()}
+            disabled={regenerateMutation.isPending}
+            className="rounded-md p-1.5 text-muted-foreground hover:bg-orange-500/10 hover:text-orange-500 disabled:opacity-40"
+            title="Get a new Cloudflare URL"
+          >
+            <RefreshCw
+              className={cn(
+                "h-3.5 w-3.5",
+                regenerateMutation.isPending && "animate-spin"
+              )}
+            />
+          </button>
         )}
         {confirmDelete ? (
           <>
@@ -170,6 +213,7 @@ function ExposureRow({
 }
 
 export function ExposuresPage() {
+  const queryClient = useQueryClient();
   const { data: exposures = [], isLoading } = useQuery({
     queryKey: ["exposures"],
     queryFn: listExposures,
@@ -178,6 +222,20 @@ export function ExposuresPage() {
     queryKey: ["local-instances"],
     queryFn: listLocalInstances,
   });
+
+  // Auto-reprovision cloudflare exposures that are "pending" (e.g. after app restart)
+  useEffect(() => {
+    if (exposures.length === 0) return;
+    const pendingCloudflare = exposures.filter(
+      (e) => e.method === "cloudflare" && e.status === "pending"
+    );
+    if (pendingCloudflare.length === 0) return;
+    // Group by instance_id and reprovision each
+    const instanceIds = [...new Set(pendingCloudflare.map((e) => e.instance_id))];
+    Promise.all(instanceIds.map((id) => reprovisionCloudflareExposures(id))).then(
+      () => queryClient.invalidateQueries({ queryKey: ["exposures"] })
+    );
+  }, [exposures, queryClient]);
 
   const instanceMap = useMemo(
     () => new Map(instances.map((i) => [i.id, i])),
