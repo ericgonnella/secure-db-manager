@@ -44,6 +44,8 @@ interface ServiceOption {
   scheme: string;
   /** HTTP-based service (e.g. PocketBase) — no traditional SQL connection string */
   isHttpService?: boolean;
+  /** Service creates an admin/superuser via CLI instead of env-var credentials */
+  requiresSuperuser?: boolean;
 }
 
 const SERVICE_OPTIONS: ServiceOption[] = [
@@ -110,6 +112,7 @@ const SERVICE_OPTIONS: ServiceOption[] = [
     hasAuth: false,
     scheme: "http",
     isHttpService: true,
+    requiresSuperuser: true,
   },
 ];
 
@@ -333,8 +336,9 @@ function StepConfigure({
             const slug = slugify(v);
             onChange({
               name: v,
-              dbName: slug || state.dbName,
-              username: slug ? `${slug}_user` : state.username,
+              // Only auto-fill dbName / username for SQL services
+              ...(service.hasDatabase ? { dbName: slug || state.dbName } : {}),
+              ...(service.hasAuth ? { username: slug ? `${slug}_user` : state.username } : {}),
             });
           }}
           placeholder="e.g. inventory-dev"
@@ -396,13 +400,60 @@ function StepConfigure({
         </Field>
       )}
 
-      {service.isHttpService ? (
-        <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-4 py-3 text-xs text-blue-700 dark:text-blue-300">
-          PocketBase does not require credentials at setup. After the container
-          starts, open <strong>http://127.0.0.1:{state.port}/_/</strong> in your
-          browser to create the admin account on first run.
-        </div>
-      ) : (
+      {service.requiresSuperuser ? (
+        <>
+          <Field
+            label="Admin email"
+            id="username"
+            hint="This becomes the PocketBase superuser login. Created automatically on first start."
+          >
+            <Input
+              id="username"
+              type="email"
+              value={state.username}
+              onChange={(v) => onChange({ username: v })}
+              placeholder="admin@example.com"
+            />
+          </Field>
+          <Field
+            label="Admin password"
+            id="password"
+            hint="Minimum 10 characters (PocketBase requirement)."
+          >
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Input
+                  id="password"
+                  type={showPw ? "text" : "password"}
+                  value={state.password}
+                  onChange={(v) => onChange({ password: v })}
+                  placeholder="••••••••••••"
+                  className="pr-9"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPw((v) => !v)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  {showPw ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => onChange({ password: generatePassword() })}
+                title="Generate password"
+                className="flex items-center justify-center rounded-lg border border-border px-3 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <RefreshCw className="h-4 w-4" />
+              </button>
+            </div>
+          </Field>
+        </>
+      ) : service.isHttpService ? null : (
         <Field label="Password" id="password">
         <div className="flex gap-2">
           <div className="relative flex-1">
@@ -481,6 +532,7 @@ function StepReview({ state }: { state: WizardState }) {
   ];
   if (service.hasDatabase) rows.push(["Database", state.dbName]);
   if (service.hasAuth) rows.push(["Username", state.username]);
+  if (service.requiresSuperuser) rows.push(["Admin email", state.username]);
 
   return (
     <div className="space-y-4">
@@ -500,15 +552,15 @@ function StepReview({ state }: { state: WizardState }) {
         <p className="text-xs text-muted-foreground">Connection string</p>
         <ConnectionStringRow connStr={connStr} />
       </div>
-      {service.isHttpService ? (
-        <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-4 py-3">
-          <p className="text-xs text-blue-700 dark:text-blue-300">
-            After starting, open{" "}
-            <strong>http://127.0.0.1:{port}/_/</strong> to create the admin
-            account. Credentials are managed via the PocketBase web console.
+      {service.requiresSuperuser ? (
+        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
+          <p className="text-xs text-emerald-700 dark:text-emerald-300">
+            The superuser <strong>{state.username}</strong> will be created
+            automatically inside the container on first start. Save your
+            password — it won’t be shown again.
           </p>
         </div>
-      ) : (
+      ) : service.isHttpService ? null : (
         <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3">
           <p className="text-xs text-amber-700 dark:text-amber-400">
             Save your password now — it won't be shown in full again.
@@ -529,7 +581,14 @@ function validateStep(step: number, state: WizardState): string | null {
       return "Database name is required.";
     if (service.hasAuth && !state.username.trim())
       return "Username is required.";
-    if (!service.isHttpService) {
+    if (service.requiresSuperuser) {
+      if (!state.username.trim()) return "Admin email is required.";
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(state.username))
+        return "Admin email must be a valid email address.";
+      if (!state.password.trim()) return "Password is required.";
+      if (state.password.length < 10)
+        return "PocketBase admin password must be at least 10 characters.";
+    } else if (!service.isHttpService) {
       if (!state.password.trim()) return "Password is required.";
       if (state.password.length < 8)
         return "Password must be at least 8 characters.";
@@ -567,6 +626,10 @@ export function CreateInstanceWizard({
         const opt = getServiceOption(partial.serviceType);
         next.version = opt.versions[0];
         next.port = String(opt.defaultPort);
+        // Clear username so PocketBase doesn't inherit a slugged DB username
+        if (opt.requiresSuperuser) {
+          next.username = "";
+        }
       }
       return next;
     });
@@ -598,8 +661,8 @@ export function CreateInstanceWizard({
         version: state.version,
         port: parseInt(state.port, 10),
         db_name: service.hasDatabase ? state.dbName : null,
-        username: service.hasAuth ? state.username : null,
-        password: service.isHttpService ? "" : state.password,
+        username: service.hasAuth || service.requiresSuperuser ? state.username : null,
+        password: service.isHttpService && !service.requiresSuperuser ? "" : state.password,
         environment: state.environment,
         project_id: projectId,
       };

@@ -8,8 +8,10 @@ import { AppShell } from "./components/app-shell";
 import { ProjectProvider } from "./lib/projects";
 import { DashboardPage } from "./routes/dashboard";
 import { LocalInstancesPage } from "./routes/local-instances";
+import { RemoteHostsPage } from "./routes/hosts";
 import { AuditLogsPage } from "./routes/audit-logs";
 import { BackupsPage } from "./routes/backups";
+import { ExposuresPage } from "./routes/exposures";
 import { PlaceholderPage } from "./routes/placeholder";
 
 const queryClient = new QueryClient({
@@ -45,11 +47,15 @@ export default function App() {
             />
             <Route
               path="/hosts"
-              element={<PlaceholderPage title="Remote Hosts" />}
+              element={<RemoteHostsPage />}
             />
             <Route
               path="/broker"
               element={<PlaceholderPage title="Access Broker" />}
+            />
+            <Route
+              path="/exposures"
+              element={<ExposuresPage />}
             />
             <Route
               path="/backups"

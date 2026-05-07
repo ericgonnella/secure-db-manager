@@ -1,6 +1,7 @@
 mod commands;
 mod local_store;
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use commands::docker::DockerMode;
 
@@ -9,6 +10,9 @@ use commands::docker::DockerMode;
 /// commands know whether to run `docker ...` or `wsl docker ...`.
 pub struct AppState {
     pub docker_mode: Mutex<DockerMode>,
+    /// Long-running child processes (cloudflared, ngrok) keyed by exposure id.
+    /// Stored as raw Child handles so we can kill them on teardown.
+    pub exposure_children: Mutex<HashMap<String, std::process::Child>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -16,12 +20,14 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             docker_mode: Mutex::new(DockerMode::None),
+            exposure_children: Mutex::new(HashMap::new()),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::docker::detect_docker,
             commands::instances::create_local_instance,
+            commands::instances::setup_pocketbase_superuser,
             commands::instances::list_local_instances,
             commands::instances::list_audit_logs,
             commands::instances::start_local_instance,
@@ -35,6 +41,19 @@ pub fn run() {
             commands::instances::restore_instance,
             commands::instances::list_backups,
             commands::instances::delete_backup,
+            commands::hosts::add_remote_host,
+            commands::hosts::list_remote_hosts,
+            commands::hosts::delete_remote_host,
+            commands::hosts::get_remote_host_credentials,
+            commands::hosts::set_remote_host_password,
+            commands::hosts::test_remote_connection,
+            commands::exposure::preview_exposure,
+            commands::exposure::create_exposure,
+            commands::exposure::list_exposures,
+            commands::exposure::remove_exposure,
+            commands::exposure::check_tool_available,
+            commands::exposure::download_and_install_tool,
+            commands::exposure::add_firewall_rule,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

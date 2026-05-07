@@ -65,6 +65,14 @@ export async function createLocalInstance(
   return invoke<LocalInstance>("create_local_instance", { input });
 }
 
+export async function setupPocketbaseSuperuser(
+  instanceId: string,
+  email: string,
+  password: string
+): Promise<void> {
+  return invoke("setup_pocketbase_superuser", { instanceId, email, password });
+}
+
 export async function listLocalInstances(): Promise<LocalInstance[]> {
   return invoke<LocalInstance[]>("list_local_instances");
 }
@@ -190,4 +198,191 @@ export interface AuditEvent {
 
 export async function listAuditLogs(): Promise<AuditEvent[]> {
   return invoke<AuditEvent[]>("list_audit_logs");
+}
+
+// ── Remote hosts ───────────────────────────────────────────────────────────
+
+export type SslMode = "disable" | "require" | "verify-ca" | "verify-full";
+export type RemoteAuthType = "password" | "ssh-tunnel";
+
+export interface RemoteHost {
+  id: string;
+  name: string;
+  service_type: string;
+  environment: string;
+  host: string;
+  port: number;
+  db_name: string | null;
+  username: string;
+  ssl_mode: SslMode;
+  auth_type: RemoteAuthType;
+  ssh_host: string | null;
+  ssh_port: number | null;
+  ssh_user: string | null;
+  ssh_key_path: string | null;
+  notes: string | null;
+  created_at: string;
+  project_id: string;
+}
+
+export interface AddRemoteHostInput {
+  name: string;
+  service_type: ServiceType;
+  environment: string;
+  host: string;
+  port: number;
+  db_name: string | null;
+  username: string;
+  password: string;
+  ssl_mode?: SslMode;
+  auth_type?: RemoteAuthType;
+  ssh_host?: string | null;
+  ssh_port?: number | null;
+  ssh_user?: string | null;
+  ssh_key_path?: string | null;
+  notes?: string | null;
+  project_id?: string;
+}
+
+export interface RemoteHostCredentials {
+  host_id: string;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  db_name: string | null;
+  connection_uri: string;
+}
+
+export interface RemoteConnectionResult {
+  healthy: boolean;
+  latency_ms: number;
+  message: string;
+}
+
+export async function addRemoteHost(
+  input: AddRemoteHostInput
+): Promise<RemoteHost> {
+  return invoke<RemoteHost>("add_remote_host", { input });
+}
+
+export async function listRemoteHosts(): Promise<RemoteHost[]> {
+  return invoke<RemoteHost[]>("list_remote_hosts");
+}
+
+export async function deleteRemoteHost(hostId: string): Promise<void> {
+  return invoke<void>("delete_remote_host", { hostId });
+}
+
+export async function getRemoteHostCredentials(
+  hostId: string
+): Promise<RemoteHostCredentials> {
+  return invoke<RemoteHostCredentials>("get_remote_host_credentials", {
+    hostId,
+  });
+}
+
+export async function setRemoteHostPassword(
+  hostId: string,
+  password: string
+): Promise<void> {
+  return invoke<void>("set_remote_host_password", { hostId, password });
+}
+
+export async function testRemoteConnection(
+  hostId: string
+): Promise<RemoteConnectionResult> {
+  return invoke<RemoteConnectionResult>("test_remote_connection", { hostId });
+}
+
+// ── Public exposures ───────────────────────────────────────────────────────
+
+export type ExposureMethod = "direct" | "cloudflare" | "ngrok" | "nginx";
+
+export interface ExposureRequest {
+  instance_id: string;
+  method: ExposureMethod;
+  external_port?: number | null;
+  hostname?: string | null;
+  ngrok_token?: string | null;
+}
+
+export interface ExposureStep {
+  step: number;
+  title: string;
+  description: string;
+  /** "info" | "action" | "warning" */
+  kind: string;
+}
+
+export interface ExposurePreview {
+  method: string;
+  steps: ExposureStep[];
+  expected_endpoint: string | null;
+  warnings: string[];
+}
+
+export interface Exposure {
+  id: string;
+  instance_id: string;
+  method: string;
+  status: string;
+  external_endpoint: string | null;
+  external_port: number | null;
+  provider_id: string | null;
+  pid: number | null;
+  hostname: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function previewExposure(
+  request: ExposureRequest
+): Promise<ExposurePreview> {
+  return invoke<ExposurePreview>("preview_exposure", { request });
+}
+
+export async function createExposure(
+  request: ExposureRequest
+): Promise<Exposure> {
+  return invoke<Exposure>("create_exposure", { request });
+}
+
+export async function listExposures(): Promise<Exposure[]> {
+  return invoke<Exposure[]>("list_exposures");
+}
+
+export async function removeExposure(exposureId: string): Promise<void> {
+  return invoke<void>("remove_exposure", { exposureId });
+}
+
+// ── Tool management ──────────────────────────────────────────────────────
+
+export interface ToolStatus {
+  available: boolean;
+  path: string | null;
+  download_url: string | null;
+}
+
+export interface FirewallResult {
+  success: boolean;
+  message: string;
+  manual_command: string | null;
+}
+
+export async function checkToolAvailable(tool: string): Promise<ToolStatus> {
+  return invoke<ToolStatus>("check_tool_available", { tool });
+}
+
+export async function downloadAndInstallTool(tool: string): Promise<string> {
+  return invoke<string>("download_and_install_tool", { tool });
+}
+
+export async function addFirewallRule(
+  port: number,
+  ruleName: string,
+  exposureId?: string,
+): Promise<FirewallResult> {
+  return invoke<FirewallResult>("add_firewall_rule", { port, ruleName, exposureId: exposureId ?? null });
 }

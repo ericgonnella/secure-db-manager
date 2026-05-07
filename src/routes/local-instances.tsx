@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   listLocalInstances,
   startLocalInstance,
@@ -7,6 +8,7 @@ import {
   deleteLocalInstance,
   getInstanceCredentials,
   setInstancePassword,
+  setupPocketbaseSuperuser,
   testConnection,
   type LocalInstance,
   type InstanceCredentials,
@@ -15,6 +17,7 @@ import {
 import { CreateInstanceWizard } from "@/features/instances/create-instance-wizard";
 import { LogsViewer } from "@/features/instances/logs-viewer";
 import { BackupManager } from "@/features/instances/backup-manager";
+import { ExposeWizard } from "@/features/exposures/expose-wizard";
 import { StatusBadge } from "@/components/status-badge";
 import { useProjects } from "@/lib/projects";
 import {
@@ -33,6 +36,8 @@ import {
   ScrollText,
   Activity,
   Archive,
+  Network,
+  ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -84,6 +89,7 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [showBackups, setShowBackups] = useState(false);
+  const [showExpose, setShowExpose] = useState(false);
   const [healthResult, setHealthResult] = useState<ConnectionTestResult | null>(
     null
   );
@@ -93,6 +99,9 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
   const [showPw, setShowPw] = useState(false);
   const [savedPwInput, setSavedPwInput] = useState("");
   const [showSavedPwInput, setShowSavedPwInput] = useState(false);
+  const [pbEmail, setPbEmail] = useState(instance.username ?? "");
+  const [pbPassword, setPbPassword] = useState("");
+  const [pbShowPw, setPbShowPw] = useState(false);
 
   const startMut = useMutation({
     mutationFn: () => startLocalInstance(instance.id),
@@ -127,6 +136,14 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
     onSuccess: () => {
       setSavedPwInput("");
       credsMut.mutate();
+    },
+  });
+
+  const pbSuperuserMut = useMutation({
+    mutationFn: () => setupPocketbaseSuperuser(instance.id, pbEmail, pbPassword),
+    onSuccess: () => {
+      setPbPassword("");
+      queryClient.invalidateQueries({ queryKey: ["local-instances"] });
     },
   });
 
@@ -176,7 +193,7 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
           </p>
         </div>
 
-        <StatusBadge variant={instance.status === "running" ? "success" : instance.status === "stopped" ? "muted" : "warning"}>
+        <StatusBadge variant={instance.status === "running" ? "success" : instance.status === "stopped" ? "error" : "warning"}>
           {instance.status}
         </StatusBadge>
 
@@ -208,6 +225,14 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
           </button>
 
           <button
+            onClick={() => setShowExpose(true)}
+            title="Expose publicly"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <Network className="h-3.5 w-3.5" />
+          </button>
+
+          <button
             disabled={healthMut.isPending || instance.status !== "running"}
             onClick={() => healthMut.mutate()}
             title={
@@ -232,12 +257,23 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
             />
           </button>
 
+          {instance.service_type === "pocketbase" && (
+            <button
+              disabled={instance.status !== "running"}
+              onClick={() => openUrl(`http://${instance.host}:${instance.port}/_/`).catch(() => {})}
+              title={instance.status !== "running" ? "Start the instance to open UI" : "Open admin UI"}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+            </button>
+          )}
+
           {instance.status === "running" ? (
             <button
               disabled={busy}
               onClick={() => stopMut.mutate()}
               title="Stop"
-              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-red-500 transition-colors hover:bg-red-500/10 hover:text-red-600 disabled:opacity-40"
             >
               <Square className="h-3.5 w-3.5" />
             </button>
@@ -246,7 +282,7 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
               disabled={busy}
               onClick={() => startMut.mutate()}
               title="Start"
-              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-emerald-500 transition-colors hover:bg-emerald-500/10 hover:text-emerald-600 disabled:opacity-40"
             >
               <Play className="h-3.5 w-3.5" />
             </button>
@@ -408,6 +444,68 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
               {String(startMut.error ?? stopMut.error)}
             </p>
           )}
+
+          {/* PocketBase superuser setup panel */}
+          {instance.service_type === "pocketbase" && (
+            <div className="rounded-lg border border-border bg-card px-4 py-3 space-y-3">
+              <p className="text-xs font-medium text-foreground">PocketBase admin credentials</p>
+              <p className="text-xs text-muted-foreground">
+                Set or reset the superuser. Runs{" "}
+                <code className="font-mono text-[10px]">pocketbase superuser upsert</code>{" "}
+                inside the container — the instance must be running.
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="email"
+                  value={pbEmail}
+                  onChange={(e) => setPbEmail(e.target.value)}
+                  placeholder="admin@example.com"
+                  className="flex-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/40"
+                />
+                <div className="relative">
+                  <input
+                    type={pbShowPw ? "text" : "password"}
+                    value={pbPassword}
+                    onChange={(e) => setPbPassword(e.target.value)}
+                    placeholder="Password (min 10 chars)"
+                    className="w-48 rounded-md border border-border bg-background px-2.5 py-1.5 pr-8 text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/40"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPbShowPw((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  >
+                    {pbShowPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+                <button
+                  disabled={
+                    pbSuperuserMut.isPending ||
+                    instance.status !== "running" ||
+                    !pbEmail.includes("@") ||
+                    pbPassword.length < 10
+                  }
+                  onClick={() => pbSuperuserMut.mutate()}
+                  className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                >
+                  {pbSuperuserMut.isPending ? "Setting…" : "Set superuser"}
+                </button>
+              </div>
+              {pbSuperuserMut.isSuccess && (
+                <p className="text-xs text-emerald-600 dark:text-emerald-400">
+                  Superuser updated successfully.
+                </p>
+              )}
+              {pbSuperuserMut.isError && (
+                <p className="text-xs text-destructive break-words">
+                  {String(pbSuperuserMut.error)}
+                </p>
+              )}
+              {instance.status !== "running" && (
+                <p className="text-xs text-muted-foreground">Start the instance first.</p>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -443,6 +541,13 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
         <BackupManager
           instance={instance}
           onClose={() => setShowBackups(false)}
+        />
+      )}
+
+      {showExpose && (
+        <ExposeWizard
+          instance={instance}
+          onClose={() => setShowExpose(false)}
         />
       )}
     </div>

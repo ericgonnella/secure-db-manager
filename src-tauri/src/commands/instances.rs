@@ -4,37 +4,38 @@ use crate::local_store::{
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use tauri::{AppHandle, Manager};
+use tokio::process::Command as TokioCommand;
 
 // ── Secret storage (OS keyring) ────────────────────────────────────────────
 
-const KEYRING_SERVICE: &str = "com.ericg.secure-db-manager";
+pub(crate) const KEYRING_SERVICE: &str = "com.ericg.secure-db-manager";
 
-fn keyring_entry(instance_id: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, instance_id)
+pub(crate) fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, account)
         .map_err(|e| format!("Failed to access OS keyring: {e}"))
 }
 
-fn store_password(instance_id: &str, password: &str) -> Result<(), String> {
-    keyring_entry(instance_id)?
+pub(crate) fn store_password(account: &str, password: &str) -> Result<(), String> {
+    keyring_entry(account)?
         .set_password(password)
         .map_err(|e| format!("Failed to save password to keyring: {e}"))
 }
 
-fn read_password(instance_id: &str) -> Result<String, String> {
-    read_password_opt(instance_id)?.ok_or_else(|| "CREDENTIAL_NOT_FOUND".to_string())
+pub(crate) fn read_password(account: &str) -> Result<String, String> {
+    read_password_opt(account)?.ok_or_else(|| "CREDENTIAL_NOT_FOUND".to_string())
 }
 
 /// Returns `None` when no credential is stored, `Err` only on real keyring failures.
-fn read_password_opt(instance_id: &str) -> Result<Option<String>, String> {
-    match keyring_entry(instance_id)?.get_password() {
+pub(crate) fn read_password_opt(account: &str) -> Result<Option<String>, String> {
+    match keyring_entry(account)?.get_password() {
         Ok(pw) => Ok(Some(pw)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(format!("Failed to read password from keyring: {e}")),
     }
 }
 
-fn forget_password(instance_id: &str) {
-    if let Ok(entry) = keyring_entry(instance_id) {
+pub(crate) fn forget_password(account: &str) {
+    if let Ok(entry) = keyring_entry(account) {
         // Best-effort delete; ignore errors (entry may not exist)
         let _ = entry.delete_credential();
     }
@@ -213,11 +214,11 @@ fn service_config(input: &CreateInstanceInput) -> Result<ServiceConfig, String> 
         "pocketbase" => ServiceConfig {
             image: format!("ghcr.io/muchobien/pocketbase:{v}"),
             container_port: 8090,
-            data_path: "/pb/pb_data",
+            data_path: "/pb_data",
             env_args: vec![],
             cmd_args: vec![],
             requires_db_name: false,
-            requires_username: false,
+            requires_username: true,  // admin email
         },
         _ => unreachable!(), // already validated above
     };
@@ -250,6 +251,74 @@ fn slugify(s: &str) -> String {
         .join("_")
 }
 
+/// Poll `127.0.0.1:<port>` via TCP until it accepts a connection or `max_secs` elapses.
+/// Returns `true` if the port became reachable, `false` on timeout.
+async fn wait_for_port(port: u16, max_secs: u64) -> bool {
+    use tokio::net::TcpStream;
+    use tokio::time::{sleep, Duration};
+    let addr = format!("127.0.0.1:{port}");
+    for _ in 0..max_secs {
+        sleep(Duration::from_secs(1)).await;
+        if TcpStream::connect(&addr).await.is_ok() {
+            // Extra buffer so PocketBase finishes its internal init before we exec into it
+            sleep(Duration::from_secs(2)).await;
+            return true;
+        }
+    }
+    false
+}
+
+/// Build the docker command args prefix (handles native vs WSL2 mode).
+fn docker_args_prefix(app: &AppHandle) -> (String, Vec<String>) {
+    let state = app.state::<crate::AppState>();
+    let mode = state.docker_mode.lock().unwrap().clone();
+    match mode {
+        crate::commands::docker::DockerMode::Wsl2 => {
+            ("wsl".into(), vec!["docker".into()])
+        }
+        _ => ("docker".into(), vec![]),
+    }
+}
+
+/// Run `docker exec <container> /usr/local/bin/pocketbase <sub_cmd> upsert <email> <password> --dir=/pb_data`
+/// using tokio's non-blocking process API, retrying up to `max_attempts` times
+/// with `delay_secs` between each try.
+/// Returns `Ok(())` on success, `Err(message)` with the last stderr after exhausting retries.
+async fn pb_superuser_upsert(
+    app: &AppHandle,
+    container: &str,
+    sub_cmd: &str,
+    email: &str,
+    password: &str,
+    max_attempts: u32,
+    delay_secs: u64,
+) -> Result<(), String> {
+    use tokio::time::{sleep, Duration};
+    let (prog, mut prefix) = docker_args_prefix(app);
+    prefix.extend(["exec".into(), container.to_string(),
+                   "/usr/local/bin/pocketbase".into(), sub_cmd.into(),
+                   "upsert".into(), email.to_string(), password.to_string(),
+                   "--dir=/pb_data".into()]);
+    let mut last_err = String::from("no attempts made");
+    for attempt in 1..=max_attempts {
+        let out = TokioCommand::new(&prog)
+            .args(&prefix)
+            .output()
+            .await
+            .map_err(|e| format!("docker exec failed to launch: {e}"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        last_err = if stderr.is_empty() { stdout } else { stderr };
+        if attempt < max_attempts {
+            sleep(Duration::from_secs(delay_secs)).await;
+        }
+    }
+    Err(last_err)
+}
+
 // ── Commands ───────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -261,7 +330,11 @@ pub async fn create_local_instance(
     if input.name.trim().is_empty() {
         return Err("Instance name is required.".into());
     }
-    if input.service_type != "pocketbase" && input.password.len() < 8 {
+    if input.service_type == "pocketbase" {
+        if input.password.len() < 10 {
+            return Err("PocketBase superuser password must be at least 10 characters.".into());
+        }
+    } else if input.password.len() < 8 {
         return Err("Password must be at least 8 characters.".into());
     }
     if input.port < 1024 {
@@ -299,7 +372,16 @@ pub async fn create_local_instance(
             return Err("Database name may contain only letters, numbers, and underscores.".into());
         }
     }
-    if cfg.requires_username && !safe_ident(&username) {
+    if input.service_type == "pocketbase" {
+        // Username is the admin email — validate format and safe characters
+        let email = &username;
+        if !email.contains('@') || !email.contains('.') {
+            return Err("PocketBase admin must be a valid email address.".into());
+        }
+        if !email.chars().all(|c| c.is_alphanumeric() || "@._-+".contains(c)) {
+            return Err("Admin email contains invalid characters.".into());
+        }
+    } else if cfg.requires_username && !safe_ident(&username) {
         return Err("Username may contain only letters, numbers, and underscores.".into());
     }
 
@@ -380,18 +462,68 @@ pub async fn create_local_instance(
     store.instances.push(instance.clone());
     save_store(&app, &store)?;
 
+    // ── PocketBase: create superuser via CLI ──────────────────────────────────
+    // PocketBase v0.23+ removed the web setup screen; the only supported way to
+    // create the first superuser is:
+    //   pocketbase superuser upsert <email> <password>   (v0.23+)
+    //   pocketbase admin upsert <email> <password>       (v0.22)
+    // We retry up to 10 times (3 s apart) so transient startup delays are handled.
+    // If it still fails we roll back the container + volume + store entry and
+    // surface the real error to the user.
+    if input.service_type == "pocketbase" {
+        let email = &instance.username;
+        let pw = &input.password;
+        let sub_cmd = if input.version.starts_with("0.22") { "admin" } else { "superuser" };
+
+        // Give PocketBase a moment to initialise its data directory before the
+        // first attempt — 5 s covers first-boot DB creation on slow machines.
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        if let Err(exec_err) = pb_superuser_upsert(
+            &app, &container_name, sub_cmd, email, pw,
+            10, 3,
+        ).await {
+            // Roll back: remove container + volume, remove from store.
+            docker_cmd(&app)
+                .args(["rm", "-f", &container_name])
+                .output()
+                .ok();
+            docker_cmd(&app)
+                .args(["volume", "rm", &volume_name])
+                .output()
+                .ok();
+            let mut store = load_store(&app);
+            store.instances.retain(|i| i.id != instance.id);
+            save_store(&app, &store)?;
+            forget_password(&instance.id);
+
+            append_audit_event(&app, AuditEvent {
+                id: uuid_v4(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                action: "pocketbase.superuser".into(),
+                instance_id: instance.id.clone(),
+                instance_name: instance.name.clone(),
+                service_type: "pocketbase".into(),
+                environment: instance.environment.clone(),
+                outcome: "error".into(),
+                detail: Some(exec_err.clone()),
+            });
+
+            return Err(format!(
+                "Container started but superuser creation failed (rolled back). \
+                 Error from PocketBase: {exec_err}. \
+                 If the image is still pulling, wait a moment and try again."
+            ));
+        }
+    }
+
     // Persist password into OS keyring (Windows Credential Manager / macOS
     // Keychain / Linux Secret Service). If this fails, the container is
     // already running and the user has the password in the wizard; surface a
     // warning via audit log but don't fail the whole command.
-    // PocketBase has no password — skip keyring storage.
-    let secret_outcome = if input.service_type == "pocketbase" {
-        None
-    } else {
-        match store_password(&instance.id, &input.password) {
-            Ok(()) => None,
-            Err(e) => Some(format!("Container started, but password could not be saved to keyring: {e}")),
-        }
+    let secret_outcome = match store_password(&instance.id, &input.password) {
+        Ok(()) => None,
+        Err(e) => Some(format!("Container started, but password could not be saved to keyring: {e}")),
     };
 
     append_audit_event(&app, AuditEvent {
@@ -421,6 +553,71 @@ pub async fn create_local_instance(
     }
 
     Ok(instance)
+}
+
+/// Exposed command: (re-)create the PocketBase superuser for an existing instance.
+/// Useful when the initial setup failed or when the admin password needs resetting.
+#[tauri::command]
+pub async fn setup_pocketbase_superuser(
+    app: AppHandle,
+    instance_id: String,
+    email: String,
+    password: String,
+) -> Result<(), String> {
+    // Validate inputs
+    if !email.contains('@') || !email.contains('.') {
+        return Err("Admin email must be a valid email address.".into());
+    }
+    if !email.chars().all(|c| c.is_alphanumeric() || "@._-+".contains(c)) {
+        return Err("Admin email contains invalid characters.".into());
+    }
+    if password.len() < 10 {
+        return Err("PocketBase admin password must be at least 10 characters.".into());
+    }
+
+    let store = load_store(&app);
+    let instance = store
+        .instances
+        .iter()
+        .find(|i| i.id == instance_id)
+        .ok_or("Instance not found.")?
+        .clone();
+
+    if instance.service_type != "pocketbase" {
+        return Err("This command only applies to PocketBase instances.".into());
+    }
+
+    let sub_cmd = if instance.service_type == "pocketbase" {
+        // Infer from container name / stored version not tracked — default to v0.23+ command.
+        "superuser"
+    } else {
+        "admin"
+    };
+
+    pb_superuser_upsert(&app, &instance.container_name, sub_cmd, &email, &password, 5, 3).await
+        .map_err(|e| format!("Superuser upsert failed: {e}"))?;
+
+    // Update stored username + keyring to match new credentials
+    let mut store = load_store(&app);
+    if let Some(inst) = store.instances.iter_mut().find(|i| i.id == instance_id) {
+        inst.username = email.clone();
+    }
+    save_store(&app, &store)?;
+    store_password(&instance_id, &password)?;
+
+    append_audit_event(&app, AuditEvent {
+        id: uuid_v4(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        action: "pocketbase.superuser".into(),
+        instance_id: instance.id.clone(),
+        instance_name: instance.name.clone(),
+        service_type: "pocketbase".into(),
+        environment: instance.environment.clone(),
+        outcome: "success".into(),
+        detail: Some(format!("Superuser set to {email}")),
+    });
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -525,6 +722,10 @@ pub async fn stop_local_instance(
     store.instances[pos].status = "stopped".into();
     save_store(&app, &store)?;
 
+    // Tear down any active exposures for this instance (stop nginx/socat/cloudflared/ngrok
+    // processes and delete their firewall rules). Best-effort — run after the audit event.
+    crate::commands::exposure::teardown_exposures_for_instance(&app, &instance.id).await;
+
     append_audit_event(&app, AuditEvent {
         id: uuid_v4(),
         timestamp: chrono::Utc::now().to_rfc3339(),
@@ -553,6 +754,10 @@ pub async fn delete_local_instance(
         .ok_or("Instance not found.")?;
 
     let instance = store.instances[pos].clone();
+
+    // Tear down any active exposures before removing the container so that nginx
+    // containers/socat sidecars can disconnect from the Docker network cleanly.
+    crate::commands::exposure::teardown_exposures_for_instance(&app, &instance.id).await;
 
     // Stop + remove container (ignore errors if already gone)
     docker_cmd(&app)
@@ -1181,7 +1386,7 @@ pub async fn delete_backup(app: AppHandle, backup_id: String) -> Result<(), Stri
 
 // ── Tiny UUID v4 (no external dep) ────────────────────────────────────────
 
-fn uuid_v4() -> String {
+pub(crate) fn uuid_v4() -> String {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).expect("getrandom failed");
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
