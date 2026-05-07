@@ -56,6 +56,11 @@ pub fn run() {
             commands::exposure::add_firewall_rule,
             commands::exposure::reprovision_cloudflare_exposures,
             commands::exposure::regenerate_cloudflare_exposure,
+            commands::config::get_data_dir,
+            commands::config::open_data_dir,
+            commands::config::clear_audit_log,
+            commands::config::export_backup,
+            commands::config::open_backup_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

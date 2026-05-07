@@ -182,6 +182,17 @@ export async function deleteBackup(backupId: string): Promise<void> {
   return invoke<void>("delete_backup", { backupId });
 }
 
+export async function exportBackup(
+  backupId: string,
+  destinationDir: string
+): Promise<string> {
+  return invoke<string>("export_backup", { backupId, destinationDir });
+}
+
+export async function openBackupFolder(backupId: string): Promise<void> {
+  return invoke<void>("open_backup_folder", { backupId });
+}
+
 // ── Audit log ──────────────────────────────────────────────────────────────
 
 export interface AuditEvent {

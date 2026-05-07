@@ -1,3 +1,4 @@
+pub mod config;
 pub mod docker;
 pub mod exposure;
 pub mod hosts;

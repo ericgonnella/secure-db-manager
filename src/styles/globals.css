@@ -69,3 +69,39 @@
     @apply bg-muted-foreground/40;
   }
 }
+
+/* ── Accessibility utility classes (toggled on <html> from settings) ─── */
+
+/* Larger base font sizes for users who need bigger text. */
+html.bp-font-lg {
+  font-size: 17px;
+}
+html.bp-font-xl {
+  font-size: 19px;
+}
+
+/* Reduced motion: kill transitions/animations for users with motion sensitivity. */
+html.bp-reduced-motion *,
+html.bp-reduced-motion *::before,
+html.bp-reduced-motion *::after {
+  transition-duration: 0.001ms !important;
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+}
+
+/* High contrast: stronger borders and text contrast for low-vision users. */
+html.bp-high-contrast {
+  --border: 240 6% 60%;
+  --muted-foreground: 240 4% 30%;
+}
+html.bp-high-contrast.dark {
+  --border: 0 0% 70%;
+  --muted-foreground: 0 0% 85%;
+}
+
+/* Always-visible focus ring (for users mixing keyboard and mouse). */
+html.bp-focus-always *:focus {
+  outline: 2px solid hsl(var(--primary)) !important;
+  outline-offset: 2px !important;
+}

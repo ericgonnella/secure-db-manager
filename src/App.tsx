@@ -13,7 +13,8 @@ import { AuditLogsPage } from "./routes/audit-logs";
 import { BackupsPage } from "./routes/backups";
 import { ExposuresPage } from "./routes/exposures";
 import { DockerPage } from "./routes/docker";
-import { PlaceholderPage } from "./routes/placeholder";
+import { SettingsPage } from "./routes/settings";
+import { initSettings } from "./lib/settings";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -24,15 +25,8 @@ const queryClient = new QueryClient({
   },
 });
 
-// Apply persisted theme before first render
-function initTheme() {
-  const stored = localStorage.getItem("bp-theme") ?? "system";
-  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-  const isDark =
-    stored === "dark" || (stored === "system" && prefersDark);
-  document.documentElement.classList.toggle("dark", isDark);
-}
-initTheme();
+// Apply persisted settings (theme + accessibility classes) before first render
+initSettings();
 
 export default function App() {
   return (
@@ -68,7 +62,7 @@ export default function App() {
             />
             <Route
               path="/settings"
-              element={<PlaceholderPage title="Settings" />}
+              element={<SettingsPage />}
             />
           </Route>
         </Routes>
