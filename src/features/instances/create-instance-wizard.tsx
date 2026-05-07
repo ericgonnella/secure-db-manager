@@ -12,11 +12,14 @@ import {
   EyeOff,
   Copy,
 } from "lucide-react";
-import { createLocalPostgres, type CreatePostgresInput } from "@/lib/tauri";
+import {
+  createLocalInstance,
+  type CreateInstanceInput,
+  type ServiceType,
+} from "@/lib/tauri";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-type ServiceType = "postgres" | "pocketbase" | "redis" | "mysql";
 type Environment = "development" | "testing" | "staging" | "production";
 
 interface WizardState {
@@ -30,12 +33,112 @@ interface WizardState {
   password: string;
 }
 
+interface ServiceOption {
+  id: ServiceType;
+  label: string;
+  versions: string[];
+  defaultPort: number;
+  hasDatabase: boolean;
+  hasAuth: boolean;
+  /** URL scheme used in the connection string */
+  scheme: string;
+  /** HTTP-based service (e.g. PocketBase) — no traditional SQL connection string */
+  isHttpService?: boolean;
+}
+
+const SERVICE_OPTIONS: ServiceOption[] = [
+  {
+    id: "postgres",
+    label: "PostgreSQL",
+    versions: ["17", "16", "15", "14"],
+    defaultPort: 5432,
+    hasDatabase: true,
+    hasAuth: true,
+    scheme: "postgresql",
+  },
+  {
+    id: "mysql",
+    label: "MySQL",
+    versions: ["9.0", "8.4", "8.0"],
+    defaultPort: 3306,
+    hasDatabase: true,
+    hasAuth: true,
+    scheme: "mysql",
+  },
+  {
+    id: "mariadb",
+    label: "MariaDB",
+    versions: ["11.4", "10.11", "10.6"],
+    defaultPort: 3307,
+    hasDatabase: true,
+    hasAuth: true,
+    scheme: "mysql",
+  },
+  {
+    id: "redis",
+    label: "Redis",
+    versions: ["7.4", "7.2", "6.2"],
+    defaultPort: 6379,
+    hasDatabase: false,
+    hasAuth: false,
+    scheme: "redis",
+  },
+  {
+    id: "mongodb",
+    label: "MongoDB",
+    versions: ["8.0", "7.0", "6.0"],
+    defaultPort: 27017,
+    hasDatabase: true,
+    hasAuth: true,
+    scheme: "mongodb",
+  },
+  {
+    id: "clickhouse",
+    label: "ClickHouse",
+    versions: ["24.12", "24.8", "23.8"],
+    defaultPort: 8123,
+    hasDatabase: true,
+    hasAuth: true,
+    scheme: "clickhouse",
+  },
+  {
+    id: "pocketbase",
+    label: "PocketBase",
+    versions: ["0.24", "0.23", "0.22"],
+    defaultPort: 8090,
+    hasDatabase: false,
+    hasAuth: false,
+    scheme: "http",
+    isHttpService: true,
+  },
+];
+
+function getServiceOption(id: ServiceType): ServiceOption {
+  return SERVICE_OPTIONS.find((s) => s.id === id) ?? SERVICE_OPTIONS[0];
+}
+
+function buildConnectionString(
+  service: ServiceOption,
+  state: WizardState,
+  port: string
+): string {
+  if (service.isHttpService) {
+    return `http://127.0.0.1:${port}`;
+  }
+  if (!service.hasAuth) {
+    // Redis: password-only auth, no user, no db name in URL
+    return `${service.scheme}://:${state.password}@127.0.0.1:${port}/0`;
+  }
+  const dbPart = service.hasDatabase ? `/${state.dbName}` : "";
+  return `${service.scheme}://${state.username}:${state.password}@127.0.0.1:${port}${dbPart}`;
+}
+
 const DEFAULT_STATE: WizardState = {
   serviceType: "postgres",
   environment: "development",
   name: "",
   version: "17",
-  port: "5435",
+  port: "5432",
   dbName: "",
   username: "",
   password: "",
@@ -68,18 +171,6 @@ function copyText(text: string) {
 
 // ── Step components ───────────────────────────────────────────────────────
 
-const SERVICE_OPTIONS: {
-  id: ServiceType;
-  label: string;
-  version: string;
-  disabled?: boolean;
-}[] = [
-  { id: "postgres", label: "PostgreSQL", version: "17" },
-  { id: "pocketbase", label: "PocketBase", version: "latest", disabled: true },
-  { id: "redis", label: "Redis", version: "7", disabled: true },
-  { id: "mysql", label: "MySQL", version: "8", disabled: true },
-];
-
 function StepService({
   value,
   onChange,
@@ -96,34 +187,26 @@ function StepService({
         {SERVICE_OPTIONS.map((opt) => (
           <button
             key={opt.id}
-            disabled={opt.disabled}
             onClick={() => onChange(opt.id)}
             className={cn(
               "flex flex-col items-start rounded-xl border px-4 py-4 text-left transition-colors",
-              opt.disabled && "cursor-not-allowed opacity-40",
-              !opt.disabled &&
-                value === opt.id &&
-                "border-primary bg-primary/5",
-              !opt.disabled &&
-                value !== opt.id &&
-                "border-border hover:border-muted-foreground"
+              value === opt.id
+                ? "border-primary bg-primary/5"
+                : "border-border hover:border-muted-foreground"
             )}
           >
             <div className="flex w-full items-center justify-between">
               <Database className="h-5 w-5 text-muted-foreground" />
-              {!opt.disabled && value === opt.id && (
+              {value === opt.id && (
                 <Check className="h-4 w-4 text-primary" />
-              )}
-              {opt.disabled && (
-                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                  soon
-                </span>
               )}
             </div>
             <span className="mt-3 text-sm font-medium text-foreground">
               {opt.label}
             </span>
-            <span className="text-xs text-muted-foreground">v{opt.version}</span>
+            <span className="text-xs text-muted-foreground">
+              {opt.versions.length} versions
+            </span>
           </button>
         ))}
       </div>
@@ -234,6 +317,7 @@ function StepConfigure({
   onChange: (patch: Partial<WizardState>) => void;
 }) {
   const [showPw, setShowPw] = useState(false);
+  const service = getServiceOption(state.serviceType);
 
   return (
     <div className="space-y-4">
@@ -257,48 +341,69 @@ function StepConfigure({
         />
       </Field>
 
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Version" id="version">
-          <Input
-            id="version"
-            value={state.version}
-            onChange={(v) => onChange({ version: v })}
-            placeholder="17"
-          />
-        </Field>
-        <Field
-          label="Host port"
+      <Field label="Version" id="version">
+        <div className="inline-flex flex-wrap gap-1.5 rounded-lg border border-border bg-muted/40 p-1">
+          {service.versions.map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => onChange({ version: v })}
+              className={cn(
+                "rounded-md px-3 py-1 text-xs font-medium transition-colors",
+                state.version === v
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      <Field
+        label="Host port"
+        id="port"
+        hint={`The local port to bind on 127.0.0.1. Default for ${service.label}: ${service.defaultPort}.`}
+      >
+        <Input
           id="port"
-          hint="The local port to bind on 127.0.0.1."
-        >
+          value={state.port}
+          onChange={(v) => onChange({ port: v })}
+          placeholder={String(service.defaultPort)}
+        />
+      </Field>
+
+      {service.hasDatabase && (
+        <Field label="Database name" id="dbName">
           <Input
-            id="port"
-            value={state.port}
-            onChange={(v) => onChange({ port: v })}
-            placeholder="5435"
+            id="dbName"
+            value={state.dbName}
+            onChange={(v) => onChange({ dbName: v })}
+            placeholder="my_database"
           />
         </Field>
-      </div>
+      )}
 
-      <Field label="Database name" id="dbName">
-        <Input
-          id="dbName"
-          value={state.dbName}
-          onChange={(v) => onChange({ dbName: v })}
-          placeholder="my_database"
-        />
-      </Field>
+      {service.hasAuth && (
+        <Field label="Username" id="username">
+          <Input
+            id="username"
+            value={state.username}
+            onChange={(v) => onChange({ username: v })}
+            placeholder="db_user"
+          />
+        </Field>
+      )}
 
-      <Field label="Username" id="username">
-        <Input
-          id="username"
-          value={state.username}
-          onChange={(v) => onChange({ username: v })}
-          placeholder="db_user"
-        />
-      </Field>
-
-      <Field label="Password" id="password">
+      {service.isHttpService ? (
+        <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-4 py-3 text-xs text-blue-700 dark:text-blue-300">
+          PocketBase does not require credentials at setup. After the container
+          starts, open <strong>http://127.0.0.1:{state.port}/_/</strong> in your
+          browser to create the admin account on first run.
+        </div>
+      ) : (
+        <Field label="Password" id="password">
         <div className="flex gap-2">
           <div className="relative flex-1">
             <Input
@@ -331,6 +436,7 @@ function StepConfigure({
           </button>
         </div>
       </Field>
+      )}
     </div>
   );
 }
@@ -361,18 +467,20 @@ function ConnectionStringRow({ connStr }: { connStr: string }) {
 }
 
 function StepReview({ state }: { state: WizardState }) {
-  const port = state.port || "5435";
-  const connStr = `postgresql://${state.username}:${state.password}@127.0.0.1:${port}/${state.dbName}`;
+  const service = getServiceOption(state.serviceType);
+  const port = state.port || String(service.defaultPort);
+  const connStr = buildConnectionString(service, state, port);
+  const slug = slugify(state.name);
 
   const rows: [string, string][] = [
-    ["Service", "PostgreSQL " + state.version],
+    ["Service", `${service.label} ${state.version}`],
     ["Environment", state.environment],
-    ["Container", `sdm_${slugify(state.name)}_postgres`],
-    ["Volume", `sdm_${slugify(state.name)}_pgdata`],
+    ["Container", `sdm_${slug}_${service.id}`],
+    ["Volume", `sdm_${slug}_${service.id}_data`],
     ["Host port", `127.0.0.1:${port}`],
-    ["Database", state.dbName],
-    ["Username", state.username],
   ];
+  if (service.hasDatabase) rows.push(["Database", state.dbName]);
+  if (service.hasAuth) rows.push(["Username", state.username]);
 
   return (
     <div className="space-y-4">
@@ -392,11 +500,21 @@ function StepReview({ state }: { state: WizardState }) {
         <p className="text-xs text-muted-foreground">Connection string</p>
         <ConnectionStringRow connStr={connStr} />
       </div>
-      <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3">
-        <p className="text-xs text-amber-700 dark:text-amber-400">
-          Save your password now — it won't be shown in full again.
-        </p>
-      </div>
+      {service.isHttpService ? (
+        <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-4 py-3">
+          <p className="text-xs text-blue-700 dark:text-blue-300">
+            After starting, open{" "}
+            <strong>http://127.0.0.1:{port}/_/</strong> to create the admin
+            account. Credentials are managed via the PocketBase web console.
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3">
+          <p className="text-xs text-amber-700 dark:text-amber-400">
+            Save your password now — it won't be shown in full again.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -405,12 +523,17 @@ function StepReview({ state }: { state: WizardState }) {
 
 function validateStep(step: number, state: WizardState): string | null {
   if (step === 2) {
+    const service = getServiceOption(state.serviceType);
     if (!state.name.trim()) return "Instance name is required.";
-    if (!state.dbName.trim()) return "Database name is required.";
-    if (!state.username.trim()) return "Username is required.";
-    if (!state.password.trim()) return "Password is required.";
-    if (state.password.length < 8)
-      return "Password must be at least 8 characters.";
+    if (service.hasDatabase && !state.dbName.trim())
+      return "Database name is required.";
+    if (service.hasAuth && !state.username.trim())
+      return "Username is required.";
+    if (!service.isHttpService) {
+      if (!state.password.trim()) return "Password is required.";
+      if (state.password.length < 8)
+        return "Password must be at least 8 characters.";
+    }
     const port = parseInt(state.port, 10);
     if (isNaN(port) || port < 1024 || port > 65535)
       return "Port must be between 1024 and 65535.";
@@ -420,7 +543,13 @@ function validateStep(step: number, state: WizardState): string | null {
 
 // ── Main wizard ───────────────────────────────────────────────────────────
 
-export function CreateInstanceWizard({ onClose }: { onClose: () => void }) {
+export function CreateInstanceWizard({
+  onClose,
+  projectId = "default",
+}: {
+  onClose: () => void;
+  projectId?: string;
+}) {
   const queryClient = useQueryClient();
   const [step, setStep] = useState(0);
   const [state, setState] = useState<WizardState>({
@@ -431,7 +560,16 @@ export function CreateInstanceWizard({ onClose }: { onClose: () => void }) {
   const [submitting, setSubmitting] = useState(false);
 
   function patch(partial: Partial<WizardState>) {
-    setState((s) => ({ ...s, ...partial }));
+    setState((s) => {
+      const next = { ...s, ...partial };
+      // When the service type changes, snap version + port to that service's defaults
+      if (partial.serviceType && partial.serviceType !== s.serviceType) {
+        const opt = getServiceOption(partial.serviceType);
+        next.version = opt.versions[0];
+        next.port = String(opt.defaultPort);
+      }
+      return next;
+    });
     setError(null);
   }
 
@@ -453,16 +591,19 @@ export function CreateInstanceWizard({ onClose }: { onClose: () => void }) {
     setSubmitting(true);
     setError(null);
     try {
-      const input: CreatePostgresInput = {
+      const service = getServiceOption(state.serviceType);
+      const input: CreateInstanceInput = {
+        service_type: state.serviceType,
         name: state.name,
         version: state.version,
         port: parseInt(state.port, 10),
-        db_name: state.dbName,
-        username: state.username,
-        password: state.password,
+        db_name: service.hasDatabase ? state.dbName : null,
+        username: service.hasAuth ? state.username : null,
+        password: service.isHttpService ? "" : state.password,
         environment: state.environment,
+        project_id: projectId,
       };
-      await createLocalPostgres(input);
+      await createLocalInstance(input);
       await queryClient.invalidateQueries({ queryKey: ["local-instances"] });
       onClose();
     } catch (e) {

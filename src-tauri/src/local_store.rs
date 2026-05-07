@@ -19,11 +19,52 @@ pub struct LocalInstance {
     pub username: String,
     pub status: String,
     pub created_at: String,
+    #[serde(default = "default_project_id")]
+    pub project_id: String,
+}
+
+fn default_project_id() -> String {
+    "default".to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AuditEvent {
+    pub id: String,
+    pub timestamp: String,
+    pub action: String,
+    pub instance_id: String,
+    pub instance_name: String,
+    pub service_type: String,
+    pub environment: String,
+    pub outcome: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BackupRecord {
+    pub id: String,
+    pub instance_id: String,
+    pub created_at: String,
+    pub file_path: String,
+    pub size_bytes: u64,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct LocalStore {
     pub instances: Vec<LocalInstance>,
+    #[serde(default)]
+    pub audit_log: Vec<AuditEvent>,
+    #[serde(default)]
+    pub backups: Vec<BackupRecord>,
+}
+
+// ── Audit helpers ──────────────────────────────────────────────────────────
+
+pub fn append_audit_event(app_handle: &tauri::AppHandle, event: AuditEvent) {
+    let mut store = load_store(app_handle);
+    store.audit_log.push(event);
+    save_store(app_handle, &store).ok();
 }
 
 // ── Store helpers ──────────────────────────────────────────────────────────
