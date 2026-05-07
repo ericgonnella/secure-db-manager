@@ -12,6 +12,7 @@ import { RemoteHostsPage } from "./routes/hosts";
 import { AuditLogsPage } from "./routes/audit-logs";
 import { BackupsPage } from "./routes/backups";
 import { ExposuresPage } from "./routes/exposures";
+import { DockerPage } from "./routes/docker";
 import { PlaceholderPage } from "./routes/placeholder";
 
 const queryClient = new QueryClient({
@@ -50,12 +51,12 @@ export default function App() {
               element={<RemoteHostsPage />}
             />
             <Route
-              path="/broker"
-              element={<PlaceholderPage title="Access Broker" />}
-            />
-            <Route
               path="/exposures"
               element={<ExposuresPage />}
+            />
+            <Route
+              path="/docker"
+              element={<DockerPage />}
             />
             <Route
               path="/backups"

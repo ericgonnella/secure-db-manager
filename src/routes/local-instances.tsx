@@ -18,6 +18,7 @@ import { CreateInstanceWizard } from "@/features/instances/create-instance-wizar
 import { LogsViewer } from "@/features/instances/logs-viewer";
 import { BackupManager } from "@/features/instances/backup-manager";
 import { ExposeWizard } from "@/features/exposures/expose-wizard";
+import { ConnectionStringsModal } from "@/features/instances/connection-strings";
 import { StatusBadge } from "@/components/status-badge";
 import { useProjects } from "@/lib/projects";
 import {
@@ -37,6 +38,7 @@ import {
   Activity,
   Archive,
   Network,
+  Plug,
   ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -90,6 +92,7 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
   const [showLogs, setShowLogs] = useState(false);
   const [showBackups, setShowBackups] = useState(false);
   const [showExpose, setShowExpose] = useState(false);
+  const [showConnect, setShowConnect] = useState(false);
   const [healthResult, setHealthResult] = useState<ConnectionTestResult | null>(
     null
   );
@@ -230,6 +233,14 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
             className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
             <Network className="h-3.5 w-3.5" />
+          </button>
+
+          <button
+            onClick={() => setShowConnect(true)}
+            title="Connection strings"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <Plug className="h-3.5 w-3.5" />
           </button>
 
           <button
@@ -548,6 +559,13 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
         <ExposeWizard
           instance={instance}
           onClose={() => setShowExpose(false)}
+        />
+      )}
+
+      {showConnect && (
+        <ConnectionStringsModal
+          instance={instance}
+          onClose={() => setShowConnect(false)}
         />
       )}
     </div>
