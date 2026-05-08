@@ -15,7 +15,7 @@ COPY src ./src
 RUN pnpm build
 
 # ── Stage 2: build the headless server binary ─────────────────────────────
-FROM rust:1.86-bookworm AS server
+FROM rust:1.88-bookworm AS server
 WORKDIR /build
 
 # System deps: keyring crate isn't used by the server feature, but rcgen +
