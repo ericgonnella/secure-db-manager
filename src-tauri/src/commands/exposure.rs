@@ -57,12 +57,30 @@ fn docker_cmd(app: &AppHandle) -> Command {
 }
 
 fn find_instance(app: &AppHandle, instance_id: &str) -> Result<LocalInstance, String> {
-    load_store(app)
-        .instances
-        .iter()
-        .find(|i| i.id == instance_id)
-        .cloned()
-        .ok_or_else(|| "Instance not found.".into())
+    let store = load_store(app);
+    if let Some(inst) = store.instances.iter().find(|i| i.id == instance_id) {
+        return Ok(inst.clone());
+    }
+    // Fallback: a web app with this id — synthesize a LocalInstance-shaped
+    // record so existing Cloudflare/ngrok/firewall pipelines work unchanged.
+    if let Some(app_rec) = store.web_apps.iter().find(|w| w.id == instance_id) {
+        return Ok(LocalInstance {
+            id: app_rec.id.clone(),
+            name: app_rec.name.clone(),
+            service_type: "web_app".to_string(),
+            environment: "development".to_string(),
+            container_name: app_rec.container_name.clone(),
+            volume_name: String::new(),
+            host: "127.0.0.1".to_string(),
+            port: app_rec.port,
+            db_name: None,
+            username: String::new(),
+            status: app_rec.status.clone(),
+            created_at: app_rec.created_at.clone(),
+            project_id: app_rec.project_id.clone(),
+        });
+    }
+    Err("Instance not found.".into())
 }
 
 fn check_active_exposure(
@@ -1058,6 +1076,7 @@ async fn create_direct(
         hostname: None,
         error: None,
         firewall_rule_name: None,
+        target_type: "instance".to_string(),
         created_at: now(),
         updated_at: now(),
     };
@@ -1168,6 +1187,7 @@ async fn create_cloudflare(
         hostname: None,
         error: None,
         firewall_rule_name: None,
+        target_type: "instance".to_string(),
         created_at: now(),
         updated_at: now(),
     };
@@ -1367,6 +1387,7 @@ async fn create_ngrok(
                 hostname: None,
                 error: None,
                 firewall_rule_name: None,
+                target_type: "instance".to_string(),
                 created_at: now(),
                 updated_at: now(),
             };
@@ -1535,6 +1556,7 @@ stream {{
         hostname: None,
         error: None,
         firewall_rule_name: None,
+        target_type: "instance".to_string(),
         created_at: now(),
         updated_at: now(),
     };

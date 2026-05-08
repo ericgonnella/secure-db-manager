@@ -241,6 +241,17 @@ fn docker_cmd(app: &AppHandle) -> Command {
     }
 }
 
+/// Best-effort attach a container to the shared baseport-net bridge so DB
+/// instances and web apps can resolve each other by container name.
+/// Failures are logged via audit but never abort the calling action — the
+/// container is still functional on its loopback host port.
+fn connect_to_baseport_net(app: &AppHandle, container: &str) -> Result<(), String> {
+    let state = app.state::<crate::AppState>();
+    let mode = state.docker_mode.lock().unwrap().clone();
+    crate::commands::docker::ensure_baseport_network(&mode)?;
+    crate::commands::docker::connect_container_to_network(&mode, container)
+}
+
 fn slugify(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
@@ -437,6 +448,10 @@ pub async fn create_local_instance(
             .ok();
         return Err(format!("Failed to start container: {err}"));
     }
+
+    // Best-effort: join the shared bridge network so web apps can reach
+    // this instance by container name (e.g. http://bp_x_pocketbase:8090).
+    let _ = connect_to_baseport_net(&app, &container_name);
 
     let id = format!("local_{}", uuid_v4());
     let now = chrono::Utc::now().to_rfc3339();
@@ -670,6 +685,10 @@ pub async fn start_local_instance(
 
     store.instances[pos].status = "running".into();
     save_store(&app, &store)?;
+
+    // Best-effort: re-join the shared bridge network in case it was recreated
+    // since the container was last running.
+    let _ = connect_to_baseport_net(&app, &instance.container_name);
 
     // Auto-reprovision any cloudflare tunnels that were paused when this instance was stopped.
     crate::commands::exposure::reprovision_cloudflare_exposures_inner(&app, &instance_id).await;

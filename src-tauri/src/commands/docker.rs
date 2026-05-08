@@ -78,6 +78,70 @@ fn check_wsl_daemon() -> (bool, Option<String>) {
     }
 }
 
+// ── Shared baseport-net network ────────────────────────────────────────────
+
+/// Name of the shared bridge network used so DB instances and web apps
+/// can reach each other by container name (e.g. http://bp_my_pb_pocketbase:8090).
+pub const BASEPORT_NETWORK: &str = "baseport-net";
+
+/// Build a `Command` for the current docker mode (native vs WSL2).
+pub fn build_docker_command(mode: &DockerMode) -> Command {
+    match mode {
+        DockerMode::Wsl2 => {
+            let mut cmd = Command::new("wsl");
+            cmd.arg("docker");
+            cmd
+        }
+        _ => Command::new("docker"),
+    }
+}
+
+/// Idempotently create the shared `baseport-net` bridge network.
+/// Returns Ok if the network exists or was created. Errors only on real failures.
+pub fn ensure_baseport_network(mode: &DockerMode) -> Result<(), String> {
+    // Quick check: does it already exist?
+    let inspect = build_docker_command(mode)
+        .args(["network", "inspect", BASEPORT_NETWORK])
+        .output();
+    if let Ok(o) = inspect {
+        if o.status.success() {
+            return Ok(());
+        }
+    }
+    let out = build_docker_command(mode)
+        .args(["network", "create", "--driver", "bridge", BASEPORT_NETWORK])
+        .output()
+        .map_err(|e| format!("Failed to run docker network create: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Race condition tolerance: another process may have created it concurrently.
+    if stderr.contains("already exists") {
+        return Ok(());
+    }
+    Err(format!("Failed to create {BASEPORT_NETWORK}: {stderr}"))
+}
+
+/// Idempotently connect a container to the shared `baseport-net` network.
+/// Treats "already exists in network" as success.
+pub fn connect_container_to_network(mode: &DockerMode, container: &str) -> Result<(), String> {
+    let out = build_docker_command(mode)
+        .args(["network", "connect", BASEPORT_NETWORK, container])
+        .output()
+        .map_err(|e| format!("Failed to run docker network connect: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("already exists in network") || stderr.contains("is already") {
+        return Ok(());
+    }
+    Err(format!(
+        "Failed to connect {container} to {BASEPORT_NETWORK}: {stderr}"
+    ))
+}
+
 // ── Setup step builders ────────────────────────────────────────────────────
 
 fn step(text: &str, code: Option<&str>) -> SetupStep {
@@ -144,6 +208,11 @@ pub async fn detect_docker(
         };
         let mode = DockerMode::Native;
         *state.docker_mode.lock().unwrap() = mode.clone();
+        // Best-effort: ensure shared bridge network exists for instance/web-app
+        // inter-container DNS. Failures are non-fatal at detection time.
+        if daemon_running {
+            let _ = ensure_baseport_network(&mode);
+        }
         return Ok(DockerStatus {
             cli_available: true,
             cli_version: Some(version),
@@ -164,6 +233,9 @@ pub async fn detect_docker(
         };
         let mode = DockerMode::Wsl2;
         *state.docker_mode.lock().unwrap() = mode.clone();
+        if daemon_running {
+            let _ = ensure_baseport_network(&mode);
+        }
         return Ok(DockerStatus {
             cli_available: true,
             cli_version: Some(version),

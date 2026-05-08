@@ -96,8 +96,67 @@ pub struct Exposure {
     /// Used to remove the rule automatically on teardown.
     #[serde(default)]
     pub firewall_rule_name: Option<String>,
+    /// "instance" (default) or "web_app" — controls whether `instance_id`
+    /// resolves against `LocalStore::instances` or `LocalStore::web_apps`.
+    #[serde(default = "default_target_type")]
+    pub target_type: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn default_target_type() -> String {
+    "instance".to_string()
+}
+
+fn default_build_output_dir() -> String {
+    String::new()
+}
+
+fn default_container_type() -> String {
+    "nginx".to_string()
+}
+
+fn default_nodejs_port() -> u16 {
+    3000
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WebApp {
+    pub id: String,
+    pub name: String,
+    pub container_name: String,
+    /// Absolute path to the per-app config dir (contains nginx.conf + www/).
+    pub config_path: String,
+    pub port: u16,
+    /// "dev" — bind-mount `src_path` read-only.
+    /// "deploy" — populate a named volume via `docker cp`.
+    pub mode: String,
+    /// Absolute host path to the project root (dev) or deploy source folder.
+    pub src_path: Option<String>,
+    /// Relative output dir inside `src_path` produced by the build step (e.g. "dist").
+    /// nginx is bound to `src_path/build_output_dir`. Empty string → serve src_path directly.
+    #[serde(default = "default_build_output_dir")]
+    pub build_output_dir: String,
+    /// Shell command to run before starting/restarting (e.g. "pnpm build").
+    /// Runs in `src_path` on the host. `None` = no build step.
+    #[serde(default)]
+    pub build_command: Option<String>,
+    /// "nginx" (default) — serve static files via nginx:alpine.
+    /// "nodejs" — run the project inside a node:lts-alpine container.
+    #[serde(default = "default_container_type")]
+    pub container_type: String,
+    /// For `container_type = "nodejs"`: command run inside the container to start the app.
+    #[serde(default)]
+    pub nodejs_start_command: Option<String>,
+    /// For `container_type = "nodejs"`: port the app listens on inside the container.
+    #[serde(default = "default_nodejs_port")]
+    pub nodejs_app_port: u16,
+    pub status: String,
+    #[serde(default)]
+    pub linked_instance_ids: Vec<String>,
+    #[serde(default = "default_project_id")]
+    pub project_id: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -111,6 +170,8 @@ pub struct LocalStore {
     pub remote_hosts: Vec<RemoteHost>,
     #[serde(default)]
     pub exposures: Vec<Exposure>,
+    #[serde(default)]
+    pub web_apps: Vec<WebApp>,
 }
 
 // ── Audit helpers ──────────────────────────────────────────────────────────

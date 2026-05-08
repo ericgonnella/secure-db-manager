@@ -409,3 +409,139 @@ export async function regenerateCloudflareExposure(
 ): Promise<Exposure> {
   return invoke<Exposure>("regenerate_cloudflare_exposure", { exposureId });
 }
+
+// ── Web Apps ───────────────────────────────────────────────────────────────
+
+export type WebAppMode = "dev" | "deploy";
+export type WebAppStatus = "running" | "stopped" | "error";
+
+export interface WebApp {
+  id: string;
+  name: string;
+  container_name: string;
+  config_path: string;
+  port: number;
+  mode: WebAppMode;
+  src_path: string | null;
+  build_output_dir: string;
+  build_command: string | null;
+  container_type: "nginx" | "nodejs";
+  nodejs_start_command: string | null;
+  nodejs_app_port: number;
+  status: WebAppStatus;
+  linked_instance_ids: string[];
+  project_id: string;
+  created_at: string;
+}
+
+export interface CreateWebAppInput {
+  name: string;
+  port: number;
+  mode: WebAppMode;
+  src_path: string | null;
+  build_output_dir: string;
+  build_command: string | null;
+  container_type: "nginx" | "nodejs";
+  nodejs_start_command: string | null;
+  nodejs_app_port?: number;
+  linked_instance_ids: string[];
+  project_id?: string;
+}
+
+export interface WebAppConnectionEntry {
+  instance_id: string;
+  instance_name: string;
+  service_type: string;
+  browser_compatible: boolean;
+  proxy_path: string | null;
+  proxy_url: string | null;
+  sdk_snippet: string | null;
+  direct_uri: string | null;
+  note: string | null;
+}
+
+export interface WebAppConnectionInfo {
+  web_app_url: string;
+  connections: WebAppConnectionEntry[];
+}
+
+export async function createWebApp(input: CreateWebAppInput): Promise<WebApp> {
+  return invoke<WebApp>("create_web_app", { input });
+}
+
+export async function listWebApps(): Promise<WebApp[]> {
+  return invoke<WebApp[]>("list_web_apps");
+}
+
+export async function startWebApp(webAppId: string): Promise<void> {
+  return invoke("start_web_app", { id: webAppId });
+}
+
+export async function stopWebApp(webAppId: string): Promise<void> {
+  return invoke("stop_web_app", { id: webAppId });
+}
+
+export async function deleteWebApp(webAppId: string): Promise<void> {
+  return invoke("delete_web_app", { id: webAppId });
+}
+
+export async function deployWebApp(
+  webAppId: string,
+  srcPath: string,
+): Promise<void> {
+  return invoke("deploy_web_app", { id: webAppId, src_path: srcPath });
+}
+
+export async function getWebAppLogs(
+  webAppId: string,
+  tail: number,
+): Promise<string> {
+  return invoke<string>("get_web_app_logs", { id: webAppId, tail });
+}
+
+export async function updateWebAppLinkedInstances(
+  webAppId: string,
+  instanceIds: string[],
+): Promise<WebApp> {
+  return invoke<WebApp>("update_web_app_linked_instances", {
+    id: webAppId,
+    instance_ids: instanceIds,
+  });
+}
+
+export async function getWebAppConnectionInfo(
+  webAppId: string,
+): Promise<WebAppConnectionInfo> {
+  return invoke<WebAppConnectionInfo>("get_web_app_connection_info", { id: webAppId });
+}
+
+export async function rebuildWebApp(webAppId: string): Promise<string> {
+  return invoke<string>("rebuild_web_app", { id: webAppId });
+}
+
+export interface WebProjectDetection {
+  project_type:
+    | "nextjs"
+    | "vite"
+    | "astro"
+    | "nuxt"
+    | "cra"
+    | "node"
+    | "node-server"
+    | "plain-html"
+    | "unknown";
+  package_manager: "npm" | "pnpm" | "yarn" | "bun" | null;
+  suggested_build_command: string | null;
+  suggested_output_dir: string | null;
+  compatible: boolean;
+  compatibility_note: string | null;
+  has_api_routes: boolean;
+  has_package_json: boolean;
+  suggested_container_type: "nginx" | "nodejs";
+  suggested_start_command: string | null;
+  suggested_app_port: number | null;
+}
+
+export async function detectWebProject(path: string): Promise<WebProjectDetection> {
+  return invoke<WebProjectDetection>("detect_web_project", { path });
+}

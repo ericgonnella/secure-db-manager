@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -43,7 +43,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function envColor(env: string) {
   switch (env) {
@@ -83,7 +83,7 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-// ── Instance row ───────────────────────────────────────────────────────────
+// â”€â”€ Instance row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function InstanceRow({ instance }: { instance: LocalInstance }) {
   const queryClient = useQueryClient();
@@ -190,8 +190,8 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
           </div>
           <p className="mt-0.5 text-xs text-muted-foreground">
             {instance.host}:{instance.port}
-            {instance.db_name ? ` · ${instance.db_name}` : ""}
-            {" · "}
+            {instance.db_name ? ` Â· ${instance.db_name}` : ""}
+            {" Â· "}
             <span className="font-mono">{instance.container_name}</span>
           </p>
         </div>
@@ -422,7 +422,7 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
                     type="password"
                     value={savedPwInput}
                     onChange={(e) => setSavedPwInput(e.target.value)}
-                    placeholder="Enter password…"
+                    placeholder="Enter passwordâ€¦"
                     className="flex-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/40"
                   />
                   <button
@@ -430,7 +430,7 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
                     onClick={() => savePwMut.mutate(savedPwInput)}
                     className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
                   >
-                    {savePwMut.isPending ? "Saving…" : "Save & reveal"}
+                    {savePwMut.isPending ? "Savingâ€¦" : "Save & reveal"}
                   </button>
                 </div>
               ) : (
@@ -463,7 +463,7 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
               <p className="text-xs text-muted-foreground">
                 Set or reset the superuser. Runs{" "}
                 <code className="font-mono text-[10px]">pocketbase superuser upsert</code>{" "}
-                inside the container — the instance must be running.
+                inside the container â€” the instance must be running.
               </p>
               <div className="flex gap-2">
                 <input
@@ -499,7 +499,7 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
                   onClick={() => pbSuperuserMut.mutate()}
                   className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
                 >
-                  {pbSuperuserMut.isPending ? "Setting…" : "Set superuser"}
+                  {pbSuperuserMut.isPending ? "Settingâ€¦" : "Set superuser"}
                 </button>
               </div>
               {pbSuperuserMut.isSuccess && (
@@ -538,7 +538,7 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
               onClick={() => deleteMut.mutate()}
               className="rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
             >
-              {deleteMut.isPending ? "Deleting…" : "Delete"}
+              {deleteMut.isPending ? "Deletingâ€¦" : "Delete"}
             </button>
           </div>
         </div>
@@ -572,7 +572,7 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
   );
 }
 
-// ── Page ───────────────────────────────────────────────────────────────────
+// â”€â”€ Page â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function LocalInstancesPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -618,7 +618,7 @@ export function LocalInstancesPage() {
 
       {isLoading ? (
         <div className="flex items-center justify-center py-16 text-sm text-muted-foreground">
-          Loading…
+          Loadingâ€¦
         </div>
       ) : instances.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-xl border border-border bg-card py-16 text-center">

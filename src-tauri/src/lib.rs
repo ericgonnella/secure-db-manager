@@ -61,6 +61,17 @@ pub fn run() {
             commands::config::clear_audit_log,
             commands::config::export_backup,
             commands::config::open_backup_folder,
+            commands::web_apps::create_web_app,
+            commands::web_apps::list_web_apps,
+            commands::web_apps::start_web_app,
+            commands::web_apps::stop_web_app,
+            commands::web_apps::delete_web_app,
+            commands::web_apps::deploy_web_app,
+            commands::web_apps::get_web_app_logs,
+            commands::web_apps::update_web_app_linked_instances,
+            commands::web_apps::get_web_app_connection_info,
+            commands::web_apps::rebuild_web_app,
+            commands::web_apps::detect_web_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

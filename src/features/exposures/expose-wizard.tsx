@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -150,7 +150,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
     mutationFn: () => downloadAndInstallTool(toolName!),
     onMutate: () => {
       setDownloadPhase("downloading");
-      setDownloadMessage("Starting download…");
+      setDownloadMessage("Starting downloadâ€¦");
       setDownloadedBytes(0);
     },
     onSuccess: () => {
@@ -232,7 +232,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
     setError(null);
   }, [step]);
 
-  // ── Live URL dialog (replaces native alert) ────────────────────────────
+  // â”€â”€ Live URL dialog (replaces native alert) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (liveUrl) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6 backdrop-blur-sm">
@@ -429,7 +429,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
 
               {method === "cloudflare" && (
                 <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-                  No configuration needed — Cloudflare will assign a random{" "}
+                  No configuration needed â€” Cloudflare will assign a random{" "}
                   <code className="rounded bg-background px-1 py-0.5 font-mono">
                     trycloudflare.com
                   </code>{" "}
@@ -462,7 +462,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
                     ) : downloadPhase === "downloading" ? (
                       <>
                         <div className="flex items-center justify-between">
-                          <span className="font-medium">Installing {toolName}…</span>
+                          <span className="font-medium">Installing {toolName}â€¦</span>
                           <span className="tabular-nums text-[10px]">
                             {downloadedBytes > 0
                               ? `${(downloadedBytes / (1024 * 1024)).toFixed(1)} MB`
@@ -657,7 +657,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
                 title={toolName && !toolAvailable ? `Install ${toolName} first` : undefined}
                 className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
               >
-                {previewMutation.isPending ? "Loading…" : "Preview steps"}
+                {previewMutation.isPending ? "Loadingâ€¦" : "Preview steps"}
               </button>
             )}
             {step === "preview" && (
@@ -666,7 +666,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
                 disabled={createMutation.isPending}
                 className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
               >
-                {createMutation.isPending ? "Setting up…" : "Confirm & run"}
+                {createMutation.isPending ? "Setting upâ€¦" : "Confirm & run"}
               </button>
             )}
             {step === "firewall" && (
@@ -678,7 +678,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
                     className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                   >
                     <ShieldCheck className="h-3.5 w-3.5" />
-                    {firewallMutation.isPending ? "Configuring…" : "Configure firewall"}
+                    {firewallMutation.isPending ? "Configuringâ€¦" : "Configure firewall"}
                   </button>
                 )}
                 <button

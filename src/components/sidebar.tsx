@@ -11,6 +11,7 @@ import {
   Settings,
   Container,
   Terminal,
+  AppWindow,
 } from "lucide-react";
 import { detectDocker, type DockerStatus } from "@/lib/tauri";
 import logo from "@/assets/logo.png";
@@ -18,6 +19,7 @@ import logo from "@/assets/logo.png";
 const navItems = [
   { label: "Dashboard", to: "/", icon: LayoutDashboard },
   { label: "Local Instances", to: "/local", icon: Server },
+  { label: "Web Apps", to: "/web-apps", icon: AppWindow },
   { label: "Remote Hosts", to: "/hosts", icon: Globe },
   { label: "Exposures", to: "/exposures", icon: Network },
   { label: "Backups", to: "/backups", icon: Archive },

@@ -14,6 +14,7 @@ import { BackupsPage } from "./routes/backups";
 import { ExposuresPage } from "./routes/exposures";
 import { DockerPage } from "./routes/docker";
 import { SettingsPage } from "./routes/settings";
+import { WebAppsPage } from "./routes/web-apps";
 import { initSettings } from "./lib/settings";
 
 const queryClient = new QueryClient({
@@ -39,6 +40,10 @@ export default function App() {
             <Route
               path="/local"
               element={<LocalInstancesPage />}
+            />
+            <Route
+              path="/web-apps"
+              element={<WebAppsPage />}
             />
             <Route
               path="/hosts"
