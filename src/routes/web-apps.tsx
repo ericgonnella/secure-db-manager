@@ -13,6 +13,7 @@ import {
   Upload,
   ExternalLink,
   Hammer,
+  Radio,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useProjects } from "@/lib/projects";
@@ -29,6 +30,7 @@ import {
 import { CreateWebAppWizard } from "@/features/web-apps/create-web-app-wizard";
 import { WebAppConnectionInfo } from "@/features/web-apps/web-app-connection-info";
 import { WebAppLogsViewer } from "@/features/web-apps/web-app-logs-viewer";
+import { ExposeWizard } from "@/features/exposures/expose-wizard";
 
 function modeBadge(mode: string) {
   return mode === "dev"
@@ -41,6 +43,7 @@ function WebAppRow({ app }: { app: WebApp }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
+  const [showExpose, setShowExpose] = useState(false);
 
   const startMut = useMutation({
     mutationFn: () => startWebApp(app.id),
@@ -145,6 +148,18 @@ function WebAppRow({ app }: { app: WebApp }) {
             <Plug className="h-3.5 w-3.5" />
           </button>
           <button
+            onClick={() => setShowExpose(true)}
+            disabled={app.status !== "running"}
+            title={
+              app.status === "running"
+                ? "Expose publicly"
+                : "Start the web app to enable public exposure"
+            }
+            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+          >
+            <Radio className="h-3.5 w-3.5" />
+          </button>
+          <button
             onClick={() => setShowLogs(true)}
             title="Logs"
             className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -239,6 +254,9 @@ function WebAppRow({ app }: { app: WebApp }) {
       )}
       {showInfo && (
         <WebAppConnectionInfo webApp={app} onClose={() => setShowInfo(false)} />
+      )}
+      {showExpose && (
+        <ExposeWizard webApp={app} onClose={() => setShowExpose(false)} />
       )}
     </>
   );

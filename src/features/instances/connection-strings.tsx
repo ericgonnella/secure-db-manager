@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Check, Copy, Globe, Lock, X } from "lucide-react";
+import { AlertTriangle, Check, Copy, Eye, EyeOff, Globe, Lock, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   buildConnectionStrings,
@@ -42,7 +42,41 @@ function CopyButton({ value }: { value: string }) {
   );
 }
 
-function StringRow({ entry }: { entry: ConnectionString }) {
+/**
+ * Replace anything that looks like a password inside a connection string
+ * with a fixed-width mask. Covers the common URI form (`scheme://user:PASS@host`)
+ * as well as CLI-style flags such as `-p'PASS'`, `-a 'PASS'`, `password=PASS`,
+ * `PGPASSWORD=PASS`, `MYSQL_PWD=PASS`, etc. Designed to be conservative — if
+ * we cannot confidently identify the secret we leave the string alone so the
+ * user can still copy a working command.
+ */
+function maskPasswordInString(value: string, password: string | undefined): string {
+  if (!password) return value;
+  // Only mask reasonably-long secrets to avoid mangling unrelated substrings.
+  if (password.length < 4) return value;
+  // Replace every literal occurrence (covers URI userinfo and bare CLI args).
+  // Also replace the URL-encoded form, which is what `connection-strings.ts`
+  // emits inside `scheme://user:ENCODED@host` URIs.
+  const encoded = encodeURIComponent(password);
+  let out = value.split(password).join("********");
+  if (encoded !== password) {
+    out = out.split(encoded).join("********");
+  }
+  return out;
+}
+
+function StringRow({
+  entry,
+  password,
+  reveal,
+}: {
+  entry: ConnectionString;
+  password: string | undefined;
+  reveal: boolean;
+}) {
+  const display = reveal
+    ? entry.value
+    : maskPasswordInString(entry.value, password);
   return (
     <div className="space-y-1">
       <div className="flex items-center gap-2">
@@ -57,7 +91,7 @@ function StringRow({ entry }: { entry: ConnectionString }) {
       </div>
       <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1.5">
         <code className="flex-1 truncate font-mono text-xs text-foreground">
-          {entry.value}
+          {display}
         </code>
         <CopyButton value={entry.value} />
       </div>
@@ -75,6 +109,9 @@ export function ConnectionStringsModal({ instance, onClose }: Props) {
   const { data: exposures = [] } = useQuery({
     queryKey: ["exposures"],
     queryFn: listExposures,
+    // Refetch every 5s so the External tab stays current with tunnel URL changes
+    // (e.g. Cloudflare regenerate, ngrok restart) while the modal is open.
+    refetchInterval: 5000,
   });
 
   const activeExposure = exposures.find(
@@ -87,10 +124,28 @@ export function ConnectionStringsModal({ instance, onClose }: Props) {
 
   const hasExternal = (sets?.external.length ?? 0) > 0;
 
-  // If no external strings, force internal tab
+  // Passwords are masked by default; the user must explicitly reveal them.
+  // The reveal state always resets to `false` whenever the modal mounts for a
+  // different instance so we never carry a previously-revealed state across
+  // accidental remounts.
+  const [revealed, setRevealed] = useState(false);
+  useEffect(() => {
+    setRevealed(false);
+  }, [instance.id]);
+  const password = useMemo(() => creds?.password, [creds]);
+
+  // Auto-switch tabs based on whether external strings exist:
+  // - If exposure goes away while on External → fall back to Local.
+  // - If exposure becomes available while on Local (and the user hasn't
+  //   explicitly switched away) → surface the new External tab.
+  const [hasAutoSwitched, setHasAutoSwitched] = useState(false);
   useEffect(() => {
     if (!hasExternal && tab === "external") setTab("internal");
-  }, [hasExternal, tab]);
+    if (hasExternal && !hasAutoSwitched && tab === "internal") {
+      setTab("external");
+      setHasAutoSwitched(true);
+    }
+  }, [hasExternal, tab, hasAutoSwitched]);
 
   return (
     <div
@@ -166,29 +221,67 @@ export function ConnectionStringsModal({ instance, onClose }: Props) {
             <p className="py-8 text-center text-sm text-destructive">
               Failed to load credentials.
             </p>
-          ) : !sets ? null : tab === "internal" ? (
+          ) : !sets ? null : (
             <div className="space-y-4">
-              {sets.internal.map((entry, idx) => (
-                <StringRow key={`int-${idx}`} entry={entry} />
-              ))}
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {activeExposure?.external_endpoint && (
-                <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                  Routed via{" "}
-                  <span className="font-mono text-foreground">
-                    {activeExposure.method}
-                  </span>{" "}
-                  →{" "}
-                  <span className="font-mono text-foreground">
-                    {activeExposure.external_endpoint}
+              {/* Credential warning + reveal toggle */}
+              <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                <div className="flex items-start gap-2 text-[11px] text-amber-700 dark:text-amber-400">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    These strings contain database credentials. Avoid pasting
+                    them into chat, screenshots, or shared logs.
                   </span>
                 </div>
+                <button
+                  onClick={() => setRevealed((r) => !r)}
+                  className="flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
+                  title={revealed ? "Hide passwords" : "Show passwords"}
+                >
+                  {revealed ? (
+                    <>
+                      <EyeOff className="h-3 w-3" /> Hide
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="h-3 w-3" /> Reveal
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {tab === "internal" ? (
+                sets.internal.map((entry, idx) => (
+                  <StringRow
+                    key={`int-${idx}`}
+                    entry={entry}
+                    password={password}
+                    reveal={revealed}
+                  />
+                ))
+              ) : (
+                <>
+                  {activeExposure?.external_endpoint && (
+                    <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                      Routed via{" "}
+                      <span className="font-mono text-foreground">
+                        {activeExposure.method}
+                      </span>{" "}
+                      →{" "}
+                      <span className="font-mono text-foreground">
+                        {activeExposure.external_endpoint}
+                      </span>
+                    </div>
+                  )}
+                  {sets.external.map((entry, idx) => (
+                    <StringRow
+                      key={`ext-${idx}`}
+                      entry={entry}
+                      password={password}
+                      reveal={revealed}
+                    />
+                  ))}
+                </>
               )}
-              {sets.external.map((entry, idx) => (
-                <StringRow key={`ext-${idx}`} entry={entry} />
-              ))}
             </div>
           )}
         </div>
@@ -196,7 +289,8 @@ export function ConnectionStringsModal({ instance, onClose }: Props) {
         {/* Footer */}
         <div className="flex items-center justify-between border-t border-border px-6 py-3">
           <p className="text-[11px] text-muted-foreground">
-            Passwords are URL-encoded. Treat these strings as secrets.
+            Passwords are URL-encoded and masked by default. Copying still
+            copies the real value — treat these strings as secrets.
           </p>
           <button
             onClick={onClose}

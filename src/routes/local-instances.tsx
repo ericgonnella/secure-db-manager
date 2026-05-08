@@ -9,6 +9,7 @@ import {
   getInstanceCredentials,
   setInstancePassword,
   setupPocketbaseSuperuser,
+  resetInstancePassword,
   testConnection,
   type LocalInstance,
   type InstanceCredentials,
@@ -85,6 +86,17 @@ function CopyButton({ text }: { text: string }) {
 
 // â”€â”€ Instance row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+/** Services that expose an HTTP admin UI. Maps service_type → { label, URL path }. */
+const SERVICE_ADMIN: Record<string, { label: string; path: string }> = {
+  pocketbase: { label: "Open admin UI", path: "/_/" },
+  clickhouse:  { label: "Open Play UI",  path: "/play" },
+};
+
+/** Services that support in-container password reset via reset_instance_password. */
+const SUPPORTS_PW_RESET = new Set([
+  "postgres", "mysql", "mariadb", "redis", "mongodb", "clickhouse",
+]);
+
 function InstanceRow({ instance }: { instance: LocalInstance }) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
@@ -105,6 +117,8 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
   const [pbEmail, setPbEmail] = useState(instance.username ?? "");
   const [pbPassword, setPbPassword] = useState("");
   const [pbShowPw, setPbShowPw] = useState(false);
+  const [resetPw, setResetPw] = useState("");
+  const [showResetPw, setShowResetPw] = useState(false);
 
   const startMut = useMutation({
     mutationFn: () => startLocalInstance(instance.id),
@@ -164,6 +178,11 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
       });
       setExpanded(true);
     },
+  });
+
+  const resetPwMut = useMutation({
+    mutationFn: (pw: string) => resetInstancePassword(instance.id, pw),
+    onSuccess: () => setResetPw(""),
   });
 
   const busy = startMut.isPending || stopMut.isPending || deleteMut.isPending;
@@ -268,11 +287,19 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
             />
           </button>
 
-          {instance.service_type === "pocketbase" && (
+          {SERVICE_ADMIN[instance.service_type] && (
             <button
               disabled={instance.status !== "running"}
-              onClick={() => openUrl(`http://${instance.host}:${instance.port}/_/`).catch(() => {})}
-              title={instance.status !== "running" ? "Start the instance to open UI" : "Open admin UI"}
+              onClick={() =>
+                openUrl(
+                  `http://${instance.host}:${instance.port}${SERVICE_ADMIN[instance.service_type]!.path}`
+                ).catch(() => {})
+              }
+              title={
+                instance.status !== "running"
+                  ? "Start the instance to open UI"
+                  : SERVICE_ADMIN[instance.service_type]!.label
+              }
               className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
             >
               <ExternalLink className="h-3.5 w-3.5" />
@@ -510,6 +537,60 @@ function InstanceRow({ instance }: { instance: LocalInstance }) {
               {pbSuperuserMut.isError && (
                 <p className="text-xs text-destructive break-words">
                   {String(pbSuperuserMut.error)}
+                </p>
+              )}
+              {instance.status !== "running" && (
+                <p className="text-xs text-muted-foreground">Start the instance first.</p>
+              )}
+            </div>
+          )}
+
+          {/* Admin password reset — postgres, mysql, mariadb, redis, mongodb, clickhouse */}
+          {SUPPORTS_PW_RESET.has(instance.service_type) && (
+            <div className="rounded-lg border border-border bg-card px-4 py-3 space-y-3">
+              <p className="text-xs font-medium text-foreground">Reset admin password</p>
+              <p className="text-xs text-muted-foreground">
+                Runs the appropriate command inside the container to update the{" "}
+                <span className="font-mono">{instance.service_type}</span> password and syncs
+                the stored credential.
+              </p>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <input
+                    type={showResetPw ? "text" : "password"}
+                    value={resetPw}
+                    onChange={(e) => setResetPw(e.target.value)}
+                    placeholder="New password (min 8 chars)"
+                    className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 pr-8 text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/40"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowResetPw((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  >
+                    {showResetPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+                <button
+                  disabled={
+                    resetPwMut.isPending ||
+                    instance.status !== "running" ||
+                    resetPw.length < 8
+                  }
+                  onClick={() => resetPwMut.mutate(resetPw)}
+                  className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                >
+                  {resetPwMut.isPending ? "Resetting…" : "Reset password"}
+                </button>
+              </div>
+              {resetPwMut.isSuccess && (
+                <p className="text-xs text-emerald-600 dark:text-emerald-400">
+                  Password reset successfully. Stored credential updated.
+                </p>
+              )}
+              {resetPwMut.isError && (
+                <p className="text-xs text-destructive break-words">
+                  {String(resetPwMut.error)}
                 </p>
               )}
               {instance.status !== "running" && (

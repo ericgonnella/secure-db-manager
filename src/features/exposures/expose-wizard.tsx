@@ -7,6 +7,7 @@ import {
   Cloud,
   Zap,
   Lock,
+  Link,
   AlertTriangle,
   Info,
   ArrowRight,
@@ -16,6 +17,7 @@ import {
   ShieldCheck,
   Copy,
   Check,
+  Router,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -24,14 +26,20 @@ import {
   checkToolAvailable,
   downloadAndInstallTool,
   addFirewallRule,
+  getPublicIp,
+  listExposures,
+  removeExposure,
   type Exposure,
   type ExposureMethod,
   type ExposurePreview,
   type LocalInstance,
+  type WebApp,
 } from "@/lib/tauri";
 
 interface Props {
-  instance: LocalInstance;
+  /** Provide either an instance or a web app as the exposure target. */
+  instance?: LocalInstance;
+  webApp?: WebApp;
   onClose: () => void;
 }
 
@@ -79,21 +87,79 @@ const METHODS: {
     Icon: Lock,
     recommendedFor: "Any service. Adds encryption layer; works for both HTTP and raw TCP protocols.",
   },
+  {
+    id: "localtunnel",
+    label: "localtunnel",
+    tagline: "Free HTTPS tunnel, no account needed",
+    description:
+      "Use localtunnel.me to get an instant public HTTPS URL for your service — completely free, no sign-up or auth token required.",
+    Icon: Link,
+    recommendedFor: "Web apps, PocketBase, ClickHouse. HTTP/HTTPS only — not suitable for raw TCP database protocols (Postgres, MySQL).",
+  },
 ];
 
-export function ExposeWizard({ instance, onClose }: Props) {
+export function ExposeWizard({ instance, webApp, onClose }: Props) {
+  // Derive a unified "target" view so the rest of the component is target-agnostic.
+  const targetId = instance?.id ?? webApp?.id ?? "";
+  const targetName = instance?.name ?? webApp?.name ?? "";
+  const targetPort = instance?.port ?? webApp?.port ?? 0;
+  const targetType: "instance" | "web_app" = webApp ? "web_app" : "instance";
+
+  // Instances: all methods except localtunnel (HTTP-only, not useful for raw TCP DBs).
+  // Web apps: all methods (HTTP-based, localtunnel makes sense).
+  const availableMethods = useMemo(
+    () =>
+      targetType === "web_app"
+        ? METHODS
+        : METHODS.filter((m) => m.id !== "localtunnel"),
+    [targetType]
+  );
+
+  // ── Smart recommendation ────────────────────────────────────────────────
+  // For instances: raw-TCP databases → ngrok; HTTP-native (PocketBase, ClickHouse) → cloudflare; fallback → direct.
+  // For web apps:  dev mode → localtunnel (instant, free); deploy mode → cloudflare (stable HTTPS).
+  const recommendedMethodId = useMemo((): ExposureMethod | null => {
+    if (targetType === "web_app" && webApp) {
+      return webApp.mode === "dev" ? "localtunnel" : "cloudflare";
+    }
+    if (instance) {
+      const rawTcp = ["postgres", "mysql", "mariadb", "mongodb", "redis"];
+      const httpBased = ["clickhouse", "pocketbase"];
+      if (rawTcp.includes(instance.service_type)) return "ngrok";
+      if (httpBased.includes(instance.service_type)) return "cloudflare";
+    }
+    return "direct";
+  }, [targetType, instance, webApp]);
+
+  // Auto-select the recommended method when the wizard first opens.
+  useEffect(() => {
+    if (method === null && recommendedMethodId) {
+      setMethod(recommendedMethodId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recommendedMethodId]);
+
   const queryClient = useQueryClient();
   const [step, setStep] = useState<"method" | "config" | "preview" | "firewall">("method");
   const [method, setMethod] = useState<ExposureMethod | null>(null);
-  // Default direct/nginx port to instance.port + 10000 to avoid host conflict
+  // Default direct/nginx port to targetPort + 10000 to avoid host conflict
   const [externalPort, setExternalPort] = useState(
-    String(Math.min(instance.port + 10000, 65535))
+    String(Math.min(targetPort + 10000, 65535))
   );
   const [ngrokToken, setNgrokToken] = useState("");
+  const [ltSubdomain, setLtSubdomain] = useState("");
   const [preview, setPreview] = useState<ExposurePreview | null>(null);
   const [createdExposure, setCreatedExposure] = useState<Exposure | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [firewallResult, setFirewallResult] = useState<string | null>(null);
+  const [publicIp, setPublicIp] = useState<string | null>(null);
+
+  // Fetch public IP as soon as we reach the firewall step
+  useEffect(() => {
+    if (step === "firewall") {
+      getPublicIp().then((ip) => setPublicIp(ip ?? null)).catch(() => {});
+    }
+  }, [step]);
 
   // Download progress tracking (cloudflared installer)
   const [downloadPhase, setDownloadPhase] = useState<"idle" | "downloading" | "complete" | "error">("idle");
@@ -112,8 +178,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
       "tool-download-progress",
       (event) => {
         if (!active) return;
-        const { tool, downloaded, phase, message } = event.payload;
-        if (tool !== "cloudflared") return;
+        const { downloaded, phase, message } = event.payload;
         setDownloadedBytes(downloaded);
         setDownloadMessage(message);
         if (phase === "downloading") setDownloadPhase("downloading");
@@ -137,7 +202,10 @@ export function ExposeWizard({ instance, onClose }: Props) {
 
   // Check if the required tool is installed for cloudflare / ngrok
   const toolName =
-    method === "cloudflare" ? "cloudflared" : method === "ngrok" ? "ngrok" : null;
+    method === "cloudflare" ? "cloudflared" :
+    method === "ngrok" ? "ngrok" :
+    method === "localtunnel" ? "lt" :
+    null;
   const toolQuery = useQuery({
     queryKey: ["tool-available", toolName],
     queryFn: () => checkToolAvailable(toolName!),
@@ -163,13 +231,33 @@ export function ExposeWizard({ instance, onClose }: Props) {
     },
   });
 
+  // ── Duplicate-exposure guard ─────────────────────────────────────────────
+  // Each target (instance or web app) can have at most one active exposure at
+  // a time. Multiple tunnels to the same target double the attack surface for
+  // no benefit.
+  const { data: allExposures = [] } = useQuery({
+    queryKey: ["exposures"],
+    queryFn: listExposures,
+  });
+  const existingExposure = allExposures.find(
+    (e) => e.instance_id === targetId && e.status === "active"
+  );
+
+  const removeExistingMutation = useMutation({
+    mutationFn: (id: string) => removeExposure(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["exposures"] });
+    },
+    onError: (err) => setError(String(err)),
+  });
+
   const firewallMutation = useMutation({
     mutationFn: () => {
       const port =
         (method === "direct" || method === "nginx")
           ? Number(externalPort)
           : createdExposure?.external_port ?? 0;
-      const ruleName = `Baseport ${instance.name} port ${port}`;
+      const ruleName = `Baseport ${targetName} port ${port}`;
       return addFirewallRule(port, ruleName, createdExposure?.id);
     },
     onSuccess: (result) => {
@@ -189,12 +277,14 @@ export function ExposeWizard({ instance, onClose }: Props) {
   const previewMutation = useMutation({
     mutationFn: () =>
       previewExposure({
-        instance_id: instance.id,
+        instance_id: targetId,
         method: method!,
         external_port: method === "direct" || method === "nginx"
           ? Number(externalPort) || null
           : null,
         ngrok_token: method === "ngrok" && ngrokToken ? ngrokToken : null,
+        lt_subdomain: method === "localtunnel" && ltSubdomain ? ltSubdomain : null,
+        target_type: targetType,
       }),
     onSuccess: (data) => {
       setPreview(data);
@@ -206,12 +296,14 @@ export function ExposeWizard({ instance, onClose }: Props) {
   const createMutation = useMutation({
     mutationFn: () =>
       createExposure({
-        instance_id: instance.id,
+        instance_id: targetId,
         method: method!,
         external_port: method === "direct" || method === "nginx"
           ? Number(externalPort) || null
           : null,
         ngrok_token: method === "ngrok" && ngrokToken ? ngrokToken : null,
+        lt_subdomain: method === "localtunnel" && ltSubdomain ? ltSubdomain : null,
+        target_type: targetType,
       }),
     onSuccess: (exposure: Exposure) => {
       queryClient.invalidateQueries({ queryKey: ["exposures"] });
@@ -291,8 +383,12 @@ export function ExposeWizard({ instance, onClose }: Props) {
               )}
             </div>
             <p className="text-[11px] text-muted-foreground">
-              The Cloudflare URL is temporary and will change if the tunnel is
-              restarted. Check the Exposures tab to see the current URL.
+              {method === "cloudflare"
+                ? "The Cloudflare URL is temporary and changes on every restart."
+                : method === "localtunnel"
+                ? "The localtunnel URL is temporary and changes on every restart."
+                : "The tunnel URL is temporary and will change if the tunnel is restarted."}{" "}
+              Check the Exposures tab to see the current URL at any time.
             </p>
           </div>
           <div className="flex justify-end border-t border-border px-5 py-3">
@@ -314,7 +410,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div>
             <h2 className="text-base font-semibold tracking-tight text-foreground">
-              Expose &ldquo;{instance.name}&rdquo; publicly
+              Expose &ldquo;{targetName}&rdquo; publicly
             </h2>
             <p className="mt-0.5 text-xs text-muted-foreground">
               Pick a method, review the steps, and we&apos;ll set it up for you.
@@ -344,9 +440,40 @@ export function ExposeWizard({ instance, onClose }: Props) {
         </div>
 
         <div className="space-y-4 px-5 py-5">
-          {step === "method" && (
+          {step === "method" && existingExposure && (
+            <div className="space-y-3">
+              <div className="flex items-start gap-2.5 rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                <div className="flex-1 space-y-2">
+                  <div className="font-medium text-amber-600 dark:text-amber-400">
+                    Already exposed via {existingExposure.method}
+                  </div>
+                  <p className="text-muted-foreground leading-relaxed">
+                    Each {targetType === "web_app" ? "web app" : "instance"} can have at most one active
+                    exposure at a time. Remove the existing exposure to create a new one.
+                  </p>
+                  {existingExposure.external_endpoint && (
+                    <div className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1.5">
+                      <code className="flex-1 truncate font-mono text-[11px] text-foreground">
+                        {existingExposure.external_endpoint}
+                      </code>
+                    </div>
+                  )}
+                  <button
+                    onClick={() => removeExistingMutation.mutate(existingExposure.id)}
+                    disabled={removeExistingMutation.isPending}
+                    className="rounded-md bg-amber-500 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-amber-600 disabled:opacity-60"
+                  >
+                    {removeExistingMutation.isPending ? "Removing…" : "Remove existing exposure"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {step === "method" && !existingExposure && (
             <div className="grid gap-2">
-              {METHODS.map((m) => {
+              {availableMethods.map((m) => {
                 const isSelected = method === m.id;
                 return (
                   <button
@@ -371,10 +498,17 @@ export function ExposeWizard({ instance, onClose }: Props) {
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-medium text-foreground">
-                          {m.label}
-                        </span>
-                        <span className="text-[11px] text-muted-foreground">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-medium text-foreground">
+                            {m.label}
+                          </span>
+                          {m.id === recommendedMethodId && (
+                            <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-500">
+                              Recommended
+                            </span>
+                          )}
+                        </div>
+                        <span className="shrink-0 text-[11px] text-muted-foreground">
                           {m.tagline}
                         </span>
                       </div>
@@ -405,7 +539,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
                     onChange={(e) =>
                       setExternalPort(e.target.value.replace(/[^\d]/g, ""))
                     }
-                    placeholder={String(instance.port)}
+                    placeholder={String(targetPort)}
                     className={inputCls}
                     inputMode="numeric"
                   />
@@ -413,28 +547,77 @@ export function ExposeWizard({ instance, onClose }: Props) {
               )}
 
               {method === "ngrok" && (
-                <Field label="ngrok auth token">
-                  <input
-                    value={ngrokToken}
-                    onChange={(e) => setNgrokToken(e.target.value)}
-                    placeholder="2abc... (find this in your ngrok dashboard)"
-                    className={inputCls}
-                    type="password"
-                  />
-                  <span className="mt-1 text-[11px] text-muted-foreground">
-                    Stored in your OS keychain. Leave blank to reuse a previously-saved token.
-                  </span>
-                </Field>
+                <>
+                  <div className="flex items-start gap-2.5 rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                    <div className="flex-1 space-y-1.5">
+                      <div className="font-medium text-amber-600 dark:text-amber-400">
+                        Billing setup required (even for the free plan)
+                      </div>
+                      <p className="text-muted-foreground leading-relaxed">
+                        ngrok TCP tunnels require a verified account. Even if you stay on the free
+                        tier, you must add a payment method on your ngrok dashboard before TCP
+                        tunnels will connect — otherwise the tunnel will start but produce no
+                        public endpoint.
+                      </p>
+                      <a
+                        href="https://dashboard.ngrok.com/billing"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-amber-700 underline hover:text-amber-800 dark:text-amber-400 dark:hover:text-amber-300"
+                      >
+                        Open ngrok billing
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+                  </div>
+                  <Field label="ngrok auth token">
+                    <input
+                      value={ngrokToken}
+                      onChange={(e) => setNgrokToken(e.target.value)}
+                      placeholder="2abc... (find this in your ngrok dashboard)"
+                      className={inputCls}
+                      type="password"
+                    />
+                    <span className="mt-1 text-[11px] text-muted-foreground">
+                      Stored in your OS keychain. Leave blank to reuse a previously-saved token.
+                    </span>
+                  </Field>
+                </>
               )}
 
               {method === "cloudflare" && (
                 <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-                  No configuration needed â€” Cloudflare will assign a random{" "}
+                  No configuration needed — Cloudflare will assign a random{" "}
                   <code className="rounded bg-background px-1 py-0.5 font-mono">
                     trycloudflare.com
                   </code>{" "}
                   URL when the tunnel starts.
                 </div>
+              )}
+
+              {method === "localtunnel" && (
+                <>
+                  <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+                    <div className="mb-1 font-medium text-foreground">No account required</div>
+                    localtunnel.me is completely free — no sign-up, no tokens. You get an instant
+                    public HTTPS URL. Works for HTTP-based services (web apps, PocketBase, ClickHouse).
+                    Not suitable for raw TCP database protocols.
+                  </div>
+                  <Field label="Custom subdomain (optional)">
+                    <input
+                      value={ltSubdomain}
+                      onChange={(e) =>
+                        setLtSubdomain(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))
+                      }
+                      placeholder="my-app  (→ https://my-app.loca.lt)"
+                      className={inputCls}
+                    />
+                    <span className="mt-1 text-[11px] text-muted-foreground">
+                      Leave blank for a random URL. Subdomains are not reserved and may already be taken.
+                    </span>
+                  </Field>
+                </>
               )}
 
               {/* Tool availability banner for cloudflare / ngrok */}
@@ -482,32 +665,17 @@ export function ExposeWizard({ instance, onClose }: Props) {
                     ) : (
                       <>
                         <span>
-                          <strong>{toolName}</strong> is not installed.{" "}
-                          {toolName === "cloudflared"
-                            ? "Click Install to download it automatically."
-                            : "Download and install it from ngrok.com/download, then return here."}
+                          <strong>{toolName}</strong> is not installed. Click Install to download it automatically.
                         </span>
                         <div className="mt-2 flex items-center gap-2">
-                          {toolName === "cloudflared" ? (
-                            <button
-                              onClick={() => installMutation.mutate()}
-                              disabled={installMutation.isPending}
-                              className="flex items-center gap-1.5 rounded-md bg-amber-500 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-amber-600 disabled:opacity-60"
-                            >
-                              <Download className="h-3 w-3" />
-                              Install cloudflared
-                            </button>
-                          ) : (
-                            <a
-                              href={toolQuery.data?.download_url ?? "https://ngrok.com/download"}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="flex items-center gap-1.5 rounded-md bg-amber-500 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-amber-600"
-                            >
-                              <ExternalLink className="h-3 w-3" />
-                              Open ngrok.com/download
-                            </a>
-                          )}
+                          <button
+                            onClick={() => installMutation.mutate()}
+                            disabled={installMutation.isPending}
+                            className="flex items-center gap-1.5 rounded-md bg-amber-500 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-amber-600 disabled:opacity-60"
+                          >
+                            <Download className="h-3 w-3" />
+                            Install {toolName}
+                          </button>
                         </div>
                       </>
                     )}
@@ -597,6 +765,54 @@ export function ExposeWizard({ instance, onClose }: Props) {
                 </div>
               </div>
 
+              {/* LAN vs internet explanation */}
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs">
+                <div className="mb-2 flex items-center gap-1.5 font-medium text-amber-600 dark:text-amber-400">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                  This address is only reachable on your local network
+                </div>
+                <p className="text-muted-foreground leading-relaxed">
+                  The IP shown ({createdExposure.external_endpoint?.split(":")[0]}) is your
+                  machine's <strong className="text-foreground">LAN address</strong>. Devices
+                  on the same Wi-Fi or Ethernet can connect using it, but a VPS or any machine
+                  on the internet cannot.
+                </p>
+                {publicIp && (
+                  <div className="mt-2.5 rounded border border-border bg-muted/40 px-2.5 py-2">
+                    <div className="mb-1 text-[11px] font-medium text-foreground">
+                      Your public internet IP
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <code className="font-mono text-foreground">
+                        {publicIp}:{createdExposure.external_port}
+                      </code>
+                      <button
+                        onClick={() => navigator.clipboard.writeText(`${publicIp}:${createdExposure.external_port}`).catch(() => {})}
+                        className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        title="Copy"
+                      >
+                        <Copy className="h-3 w-3" />
+                      </button>
+                    </div>
+                    <p className="mt-1.5 text-[11px] text-muted-foreground">
+                      To use this address from the internet you must add a{" "}
+                      <strong className="text-foreground">port forwarding rule</strong> on your
+                      router: forward external port <strong className="text-foreground">{createdExposure.external_port}</strong> →{" "}
+                      <strong className="text-foreground">{createdExposure.external_endpoint}</strong>.
+                    </p>
+                  </div>
+                )}
+                <div className="mt-2.5 flex items-start gap-1.5 text-[11px] text-muted-foreground">
+                  <Router className="mt-0.5 h-3 w-3 shrink-0" />
+                  <span>
+                    For hassle-free internet access without router changes, use a{" "}
+                    <strong className="text-foreground">Cloudflare Tunnel</strong> or{" "}
+                    <strong className="text-foreground">ngrok</strong> exposure instead — they
+                    punch through NAT automatically.
+                  </span>
+                </div>
+              </div>
+
               <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
                 <div className="mb-2 flex items-center gap-1.5 font-medium text-foreground">
                   <ShieldCheck className="h-3.5 w-3.5" />
@@ -644,7 +860,7 @@ export function ExposeWizard({ instance, onClose }: Props) {
             {step === "method" && (
               <button
                 onClick={() => method && setStep("config")}
-                disabled={!method}
+                disabled={!method || !!existingExposure}
                 className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
               >
                 Continue

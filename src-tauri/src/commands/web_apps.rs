@@ -250,9 +250,82 @@ fn default_nodejs_port_input() -> u16 {
     3000
 }
 
+/// Detect which package manager the project uses, based on lockfile presence.
+/// Returns the appropriate install command string.
+fn detect_install_command(src_path: &str) -> Option<&'static str> {
+    let p = std::path::Path::new(src_path);
+    if p.join("pnpm-lock.yaml").exists() {
+        return Some("pnpm install");
+    }
+    if p.join("bun.lockb").exists() || p.join("bun.lock").exists() {
+        return Some("bun install");
+    }
+    if p.join("yarn.lock").exists() {
+        return Some("yarn install");
+    }
+    if p.join("package-lock.json").exists() {
+        return Some("npm install");
+    }
+    if p.join("package.json").exists() {
+        return Some("npm install"); // fallback: any project with package.json
+    }
+    None
+}
+
+/// If `node_modules` is absent, auto-detect the package manager and install
+/// dependencies before the build runs. Returns `Ok(Some(cmd))` when an
+/// install was performed, `Ok(None)` when it was not needed.
+fn ensure_dependencies(src_path: &str) -> Result<Option<String>, String> {
+    if std::path::Path::new(src_path).join("node_modules").exists() {
+        return Ok(None); // nothing to do
+    }
+    let install_cmd = detect_install_command(src_path).ok_or_else(|| {
+        format!("No package.json found in '{}'. Cannot install dependencies.", src_path)
+    })?;
+    let out = if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(["/C", install_cmd])
+            .current_dir(src_path)
+            .output()
+    } else {
+        Command::new("sh")
+            .args(["-c", install_cmd])
+            .current_dir(src_path)
+            .output()
+    };
+    match out {
+        Ok(o) if o.status.success() => Ok(Some(install_cmd.to_string())),
+        Ok(o) => Err(format!(
+            "Auto-install ({install_cmd}) failed:\n{}",
+            String::from_utf8_lossy(&o.stderr)
+        )),
+        Err(e) => Err(format!("Failed to launch '{install_cmd}': {e}")),
+    }
+}
+
+/// Reject control characters, NUL bytes, and excessively long inputs.
+/// The build command is intentionally user-supplied and runs through a shell
+/// (the user is configuring their own machine), but we still defend against
+/// pathological values that could cause crashes, log corruption, or unintended
+/// shell behaviour from clipboard / persisted-store tampering.
+fn validate_user_shell_command(cmd: &str, label: &str) -> Result<(), String> {
+    const MAX_LEN: usize = 4096;
+    if cmd.len() > MAX_LEN {
+        return Err(format!(
+            "{label} is too long ({} bytes; max {MAX_LEN}).",
+            cmd.len()
+        ));
+    }
+    if cmd.chars().any(|c| c == '\0' || (c.is_control() && c != '\n' && c != '\r' && c != '\t')) {
+        return Err(format!("{label} contains disallowed control characters."));
+    }
+    Ok(())
+}
+
 /// Run a shell build command in the given directory.
 /// Uses `cmd /C` on Windows and `sh -c` elsewhere.
 fn run_build_command(src_path: &str, cmd: &str) -> Result<String, String> {
+    validate_user_shell_command(cmd, "Build command")?;
     let out = if cfg!(target_os = "windows") {
         Command::new("cmd")
             .args(["/C", cmd])
@@ -487,6 +560,9 @@ pub async fn create_web_app(
     // every request would return 404 — regardless of how many rebuilds.
     if let (Some(cmd), Some(src)) = (&input.build_command, &input.src_path) {
         if !cmd.trim().is_empty() {
+            // Auto-install dependencies if node_modules is missing.
+            ensure_dependencies(src)
+                .map_err(|e| format!("Dependency installation failed: {e}"))?;
             run_build_command(src, cmd)
                 .map_err(|e| format!("Build failed: {e}"))?;
             if !input.build_output_dir.is_empty() {
@@ -509,6 +585,7 @@ pub async fn create_web_app(
             .nodejs_start_command
             .as_deref()
             .unwrap_or("node server.js");
+        validate_user_shell_command(start_cmd, "Node.js start command")?;
         let app_port = input.nodejs_app_port;
         let host_src = host_path_for_mount(&app, src)?;
         let port_bind = format!("127.0.0.1:{}:{}", input.port, app_port);
@@ -731,7 +808,11 @@ pub async fn rebuild_web_app(app: AppHandle, id: String) -> Result<String, Strin
         let _ = std::fs::write(&main_conf_path, generate_main_nginx_conf());
     }
 
-    // Run the build
+    // Run the build (auto-install first if node_modules is missing)
+    if let Err(e) = ensure_dependencies(&src) {
+        audit(&app, &web_app, "web_app.rebuild", "error", Some(e.clone()));
+        return Err(format!("Dependency installation failed: {e}"));
+    }
     let output = match run_build_command(&src, &cmd) {
         Ok(out) => {
             audit(&app, &web_app, "web_app.rebuild", "success", None);

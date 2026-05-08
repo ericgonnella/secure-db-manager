@@ -203,6 +203,25 @@ pub async fn add_remote_host(
         }
     }
 
+    // If a key path was supplied (independent of auth type), require it to be
+    // an absolute path to an existing regular file. We do NOT silently strip it
+    // because the user may also be using ssh-tunnel auth and expects it to be
+    // honoured downstream.
+    if let Some(p) = input.ssh_key_path.as_deref() {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            let path = std::path::Path::new(trimmed);
+            if !path.is_absolute() {
+                return Err("SSH key path must be an absolute path.".into());
+            }
+            let meta = std::fs::metadata(path)
+                .map_err(|e| format!("SSH key path is not accessible: {e}"))?;
+            if !meta.is_file() {
+                return Err("SSH key path must point to a regular file.".into());
+            }
+        }
+    }
+
     let ssl_mode = input.ssl_mode.unwrap_or_else(|| {
         if matches!(input.service_type.as_str(), "redis" | "pocketbase") {
             "disable".into()

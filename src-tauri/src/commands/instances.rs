@@ -322,12 +322,77 @@ async fn pb_superuser_upsert(
         }
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        last_err = if stderr.is_empty() { stdout } else { stderr };
+        let raw = if stderr.is_empty() { stdout } else { stderr };
+        // Redact the password if PocketBase echoes the full command back in
+        // its error output (defence-in-depth — audit logs must never carry
+        // plaintext credentials).
+        last_err = redact_secret(&raw, password);
         if attempt < max_attempts {
             sleep(Duration::from_secs(delay_secs)).await;
         }
     }
     Err(last_err)
+}
+
+/// Replace every occurrence of `secret` in `s` with `***`. Empty / very
+/// short secrets are not redacted to avoid mangling unrelated text.
+pub(crate) fn redact_secret(s: &str, secret: &str) -> String {
+    if secret.len() < 4 {
+        return s.to_string();
+    }
+    s.replace(secret, "***")
+}
+
+/// Check if a Docker image exists locally; pull it if not.
+/// Returns `Ok(())` when the image is (or becomes) available.
+fn ensure_image_pulled(app: &AppHandle, image: &str) -> Result<(), String> {
+    let inspect = docker_cmd(app)
+        .args(["image", "inspect", "--format", "{{.Id}}", image])
+        .output()
+        .map_err(|e| format!("Failed to run docker: {e}"))?;
+
+    if inspect.status.success() {
+        return Ok(()); // already present
+    }
+
+    let pull = docker_cmd(app)
+        .args(["pull", image])
+        .output()
+        .map_err(|e| format!("Failed to run docker: {e}"))?;
+
+    if !pull.status.success() {
+        let err = String::from_utf8_lossy(&pull.stderr).trim().to_string();
+        return Err(format!("Failed to pull image '{image}': {err}"));
+    }
+    Ok(())
+}
+
+/// Strip Docker image-pull progress lines from stderr so callers see only the
+/// real error message.
+fn extract_docker_error(stderr: &str) -> String {
+    let is_noise = |line: &str| {
+        let l = line.trim();
+        l.is_empty()
+            || l.starts_with("Unable to find image")
+            || l.contains("Pulling from ")
+            || l.contains(": Pulling ")
+            || l.contains(": Waiting")
+            || l.contains(": Downloading")
+            || l.contains(": Extracting")
+            || l.contains(": Pull complete")
+            || l.contains(": Download complete")
+            || l.contains(": Already exists")
+            || l.contains(": Verifying Checksum")
+            || l.starts_with("Digest:")
+            || l.starts_with("Status:")
+    };
+
+    let meaningful: Vec<&str> = stderr.lines().filter(|l| !is_noise(l)).collect();
+    if meaningful.is_empty() {
+        stderr.trim().to_string()
+    } else {
+        meaningful.join("\n")
+    }
 }
 
 // ── Commands ───────────────────────────────────────────────────────────────
@@ -350,6 +415,9 @@ pub async fn create_local_instance(
     }
     if input.port < 1024 {
         return Err("Port must be 1024 or higher.".into());
+    }
+    if input.port >= 65535 {
+        return Err("Port must be below 65535.".into());
     }
 
     // Resolve service-specific config (also validates service_type + version)
@@ -405,6 +473,17 @@ pub async fn create_local_instance(
     let volume_name = format!("bp_{}_{}_data", slug, input.service_type);
     let port_bind = format!("127.0.0.1:{}:{}", input.port, cfg.container_port);
 
+    // ── Ensure image is available locally (pull if not cached) ────────────
+    ensure_image_pulled(&app, &cfg.image)?;
+
+    // ── Remove any stale container with the same name ─────────────────────
+    // A previous failed attempt leaves a dead/exited container behind.
+    // Remove it (force, ignores "not found") so docker run doesn't conflict.
+    docker_cmd(&app)
+        .args(["rm", "-f", &container_name])
+        .output()
+        .ok();
+
     // ── Create the volume ──────────────────────────────────────────────────
     let vol_out = docker_cmd(&app)
         .args(["volume", "create", &volume_name])
@@ -440,13 +519,31 @@ pub async fn create_local_instance(
         .map_err(|e| format!("Failed to run docker: {e}"))?;
 
     if !run_out.status.success() {
-        let err = String::from_utf8_lossy(&run_out.stderr);
-        // Clean up the volume we just created
+        let raw = String::from_utf8_lossy(&run_out.stderr);
+        let err = extract_docker_error(&raw);
+        // Clean up the container (may be in "created" state) and volume
+        docker_cmd(&app)
+            .args(["rm", "-f", &container_name])
+            .output()
+            .ok();
         docker_cmd(&app)
             .args(["volume", "rm", &volume_name])
             .output()
             .ok();
-        return Err(format!("Failed to start container: {err}"));
+        let msg = if err.contains("Ports are not available")
+            || err.contains("port is already allocated")
+            || err.contains("address already in use")
+            || err.contains("bind:")
+        {
+            format!(
+                "Port {} is already in use or reserved by another process. \
+                 Try a different port number.",
+                input.port
+            )
+        } else {
+            format!("Failed to start container: {}", err.trim())
+        };
+        return Err(msg);
     }
 
     // Best-effort: join the shared bridge network so web apps can reach
@@ -904,6 +1001,156 @@ pub async fn set_instance_password(
             environment: instance.environment.clone(),
             outcome: "success".into(),
             detail: Some("Password updated via UI".into()),
+        },
+    );
+
+    Ok(())
+}
+
+// ── Admin password reset ───────────────────────────────────────────────────
+
+/// Escape a string for use inside an SQL single-quoted string literal (doubles apostrophes).
+fn sql_lit(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Escape a string for embedding in a JS/mongosh single-quoted string literal.
+fn js_lit(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+/// Change the admin/root password for a running database container.
+///
+/// Reads the stored credential from the OS keyring automatically (the user does not need
+/// to supply the old password), runs the service-appropriate in-container command,
+/// then saves the new password back to the keyring.
+///
+/// Supported: postgres, mysql, mariadb, redis, mongodb, clickhouse.
+/// PocketBase uses the separate `setup_pocketbase_superuser` command instead.
+#[tauri::command]
+pub async fn reset_instance_password(
+    app: AppHandle,
+    instance_id: String,
+    new_password: String,
+) -> Result<(), String> {
+    if new_password.len() < 8 {
+        return Err("Password must be at least 8 characters.".into());
+    }
+    let store = load_store(&app);
+    let instance = store
+        .instances
+        .iter()
+        .find(|i| i.id == instance_id)
+        .ok_or("Instance not found.")?
+        .clone();
+
+    if instance.status != "running" {
+        return Err("The instance must be running to reset the password.".into());
+    }
+
+    let old_password = read_password(&instance.id)?;
+    let (prog, prefix) = docker_args_prefix(&app);
+    let mut args: Vec<String> = prefix;
+    args.push("exec".into());
+
+    match instance.service_type.as_str() {
+        "postgres" => {
+            let user = &instance.username;
+            let sql = format!("ALTER USER \"{user}\" PASSWORD '{}'", sql_lit(&new_password));
+            args.extend([
+                "-e".into(), format!("PGPASSWORD={old_password}"),
+                instance.container_name.clone(),
+                "psql".into(), "-U".into(), user.clone(), "-c".into(), sql,
+            ]);
+        }
+        "mysql" | "mariadb" => {
+            let user = &instance.username;
+            let sql = format!(
+                "ALTER USER '{user}'@'%' IDENTIFIED BY '{}'; FLUSH PRIVILEGES;",
+                sql_lit(&new_password)
+            );
+            args.extend([
+                instance.container_name.clone(),
+                "mysql".into(),
+                format!("-u{user}"),
+                format!("--password={old_password}"),
+                "-e".into(), sql,
+            ]);
+        }
+        "redis" => {
+            args.extend([
+                instance.container_name.clone(),
+                "redis-cli".into(),
+                "-a".into(), old_password.clone(),
+                "--no-auth-warning".into(),
+                "CONFIG".into(), "SET".into(), "requirepass".into(), new_password.clone(),
+            ]);
+        }
+        "mongodb" => {
+            let user = &instance.username;
+            let eval = format!(
+                "db.changeUserPassword('{}', '{}')",
+                js_lit(user), js_lit(&new_password)
+            );
+            args.extend([
+                instance.container_name.clone(),
+                "mongosh".into(), "admin".into(),
+                "--username".into(), user.clone(),
+                "--password".into(), old_password.clone(),
+                "--authenticationDatabase".into(), "admin".into(),
+                "--eval".into(), eval,
+            ]);
+        }
+        "clickhouse" => {
+            let user = &instance.username;
+            let sql = format!("ALTER USER {user} IDENTIFIED BY '{}'", sql_lit(&new_password));
+            args.extend([
+                instance.container_name.clone(),
+                "clickhouse-client".into(),
+                "--user".into(), user.clone(),
+                "--password".into(), old_password.clone(),
+                "--query".into(), sql,
+            ]);
+        }
+        other => {
+            return Err(format!(
+                "Password reset is not supported for {other}. Use the service's native tools."
+            ));
+        }
+    }
+
+    let out = TokioCommand::new(&prog)
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run docker: {e}"))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let msg = if stderr.is_empty() { stdout } else { stderr };
+        return Err(if msg.is_empty() {
+            "Password reset failed — no output from container.".into()
+        } else {
+            msg
+        });
+    }
+
+    // Persist the new password so credential reveal stays in sync.
+    store_password(&instance.id, &new_password)?;
+
+    append_audit_event(
+        &app,
+        AuditEvent {
+            id: uuid_v4(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            action: "credentials.update".into(),
+            instance_id: instance.id.clone(),
+            instance_name: instance.name.clone(),
+            service_type: instance.service_type.clone(),
+            environment: instance.environment.clone(),
+            outcome: "success".into(),
+            detail: Some("Admin password reset via UI".into()),
         },
     );
 

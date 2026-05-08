@@ -6,6 +6,7 @@ import {
   Cloud,
   Zap,
   Lock,
+  Link,
   Trash2,
   Copy,
   Check,
@@ -16,11 +17,13 @@ import {
 import {
   listExposures,
   listLocalInstances,
+  listWebApps,
   removeExposure,
   reprovisionCloudflareExposures,
   regenerateCloudflareExposure,
   type Exposure,
   type LocalInstance,
+  type WebApp,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 
@@ -34,6 +37,8 @@ function methodMeta(method: string) {
       return { label: "ngrok", Icon: Zap, color: "bg-emerald-500/10 text-emerald-500" };
     case "nginx":
       return { label: "TLS Proxy", Icon: Lock, color: "bg-purple-500/10 text-purple-500" };
+    case "localtunnel":
+      return { label: "localtunnel", Icon: Link, color: "bg-sky-500/10 text-sky-500" };
     default:
       return { label: method, Icon: Network, color: "bg-muted text-muted-foreground" };
   }
@@ -77,13 +82,17 @@ function CopyButton({ text }: { text: string }) {
 function ExposureRow({
   exposure,
   instance,
+  webApp,
 }: {
   exposure: Exposure;
   instance: LocalInstance | undefined;
+  webApp: WebApp | undefined;
 }) {
   const queryClient = useQueryClient();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const meta = methodMeta(exposure.method);
+  const isWebApp = exposure.target_type === "web_app";
+  const displayName = instance?.name ?? webApp?.name ?? exposure.instance_id;
 
   const removeMutation = useMutation({
     mutationFn: () => removeExposure(exposure.id),
@@ -115,8 +124,13 @@ function ExposureRow({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium text-foreground">
-            {instance?.name ?? exposure.instance_id}
+            {displayName}
           </span>
+          {isWebApp && (
+            <span className="rounded bg-purple-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-purple-500">
+              Web App
+            </span>
+          )}
           <span
             className={cn(
               "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
@@ -222,12 +236,20 @@ export function ExposuresPage() {
     queryKey: ["local-instances"],
     queryFn: listLocalInstances,
   });
+  const { data: webApps = [] } = useQuery({
+    queryKey: ["web-apps"],
+    queryFn: listWebApps,
+  });
 
-  // Auto-reprovision cloudflare exposures that are "pending" (e.g. after app restart)
+  // Auto-reprovision cloudflare exposures that are "pending" (e.g. after app restart),
+  // but only for instances that are currently running.
   useEffect(() => {
-    if (exposures.length === 0) return;
+    if (exposures.length === 0 || instances.length === 0) return;
+    const runningIds = new Set(
+      instances.filter((i) => i.status === "running").map((i) => i.id)
+    );
     const pendingCloudflare = exposures.filter(
-      (e) => e.method === "cloudflare" && e.status === "pending"
+      (e) => e.method === "cloudflare" && e.status === "pending" && runningIds.has(e.instance_id)
     );
     if (pendingCloudflare.length === 0) return;
     // Group by instance_id and reprovision each
@@ -235,11 +257,15 @@ export function ExposuresPage() {
     Promise.all(instanceIds.map((id) => reprovisionCloudflareExposures(id))).then(
       () => queryClient.invalidateQueries({ queryKey: ["exposures"] })
     );
-  }, [exposures, queryClient]);
+  }, [exposures, instances, queryClient]);
 
   const instanceMap = useMemo(
     () => new Map(instances.map((i) => [i.id, i])),
     [instances]
+  );
+  const webAppMap = useMemo(
+    () => new Map(webApps.map((w) => [w.id, w])),
+    [webApps]
   );
 
   return (
@@ -278,6 +304,7 @@ export function ExposuresPage() {
               key={e.id}
               exposure={e}
               instance={instanceMap.get(e.instance_id)}
+              webApp={webAppMap.get(e.instance_id)}
             />
           ))}
         </div>

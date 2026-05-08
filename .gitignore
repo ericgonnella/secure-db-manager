@@ -32,5 +32,24 @@ src-tauri/WixTools/
 .env.local
 .env.*.local
 
+# Secrets / credentials — never commit
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+*.jks
+*.keystore
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+id_ecdsa
+id_ecdsa.*
+known_hosts
+*.kdbx
+secrets.json
+credentials.json
+
 # Local app data (generated at runtime — not source)
 # src-tauri/target is already covered above

@@ -1,6 +1,6 @@
 use crate::commands::instances::uuid_v4;
 use crate::local_store::{
-    append_audit_event, load_store, save_store, AuditEvent, Exposure, LocalInstance,
+    append_audit_event, load_store, save_store, AuditEvent, Exposure, LocalInstance, WebApp,
 };
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
@@ -32,6 +32,7 @@ pub struct ExposurePreview {
 
 #[derive(Debug, Deserialize)]
 pub struct ExposureRequest {
+    /// ID of the target — either a LocalInstance or a WebApp depending on `target_type`.
     pub instance_id: String,
     /// "direct" | "cloudflare" | "ngrok" | "nginx"
     pub method: String,
@@ -39,6 +40,12 @@ pub struct ExposureRequest {
     pub hostname: Option<String>,
     /// ngrok auth token (only stored in keyring, never persisted in struct)
     pub ngrok_token: Option<String>,
+    /// "instance" (default) or "web_app". Determines which collection to look up.
+    #[serde(default)]
+    pub target_type: Option<String>,
+    /// Optional preferred subdomain for localtunnel (e.g. "myapp" → https://myapp.loca.lt).
+    /// Only ASCII alphanumeric characters and hyphens accepted.
+    pub lt_subdomain: Option<String>,
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -86,16 +93,17 @@ fn find_instance(app: &AppHandle, instance_id: &str) -> Result<LocalInstance, St
 fn check_active_exposure(
     app: &AppHandle,
     instance_id: &str,
-    method: &str,
+    _method: &str,
 ) -> Result<(), String> {
     let store = load_store(app);
-    if store
+    if let Some(existing) = store
         .exposures
         .iter()
-        .any(|e| e.instance_id == instance_id && e.method == method && e.status == "active")
+        .find(|e| e.instance_id == instance_id && e.status == "active")
     {
         return Err(format!(
-            "An active {method} exposure already exists for this instance. Remove it first."
+            "An active {} exposure already exists for this target. Remove it first before creating a new one.",
+            existing.method
         ));
     }
     Ok(())
@@ -103,8 +111,58 @@ fn check_active_exposure(
 
 fn validate_method(m: &str) -> Result<(), String> {
     match m {
-        "direct" | "cloudflare" | "ngrok" | "nginx" => Ok(()),
+        "direct" | "cloudflare" | "ngrok" | "nginx" | "localtunnel" => Ok(()),
         other => Err(format!("Unknown exposure method: {other}")),
+    }
+}
+
+/// Resolve the exposure target into a `LocalInstance` value the existing pipeline
+/// can consume. For web-app targets we build a synthetic `LocalInstance` with the
+/// fields the rest of the pipeline actually reads (`id`, `name`, `port`, `status`,
+/// `host`, `service_type`). The original WebApp record is left untouched on disk.
+fn resolve_target(
+    app: &AppHandle,
+    target_type: &str,
+    target_id: &str,
+    method: &str,
+) -> Result<(LocalInstance, String), String> {
+    match target_type {
+        "web_app" => {
+            // Web apps only support tunnel-based methods. Direct/nginx require port-forwarding
+            // workflows and DB-specific TLS that don't apply to a generic HTTP service.
+            if !matches!(method, "cloudflare" | "ngrok" | "localtunnel") {
+                return Err(format!(
+                    "Web apps support only Cloudflare, ngrok, or localtunnel exposures. \
+                     The '{method}' method is for database instances only."
+                ));
+            }
+            let store = load_store(app);
+            let web_app: &WebApp = store
+                .web_apps
+                .iter()
+                .find(|w| w.id == target_id)
+                .ok_or_else(|| format!("Web app {target_id} not found"))?;
+            let synthetic = LocalInstance {
+                id: web_app.id.clone(),
+                name: web_app.name.clone(),
+                service_type: "web_app".to_string(),
+                environment: "dev".to_string(),
+                container_name: web_app.container_name.clone(),
+                volume_name: String::new(),
+                host: "localhost".to_string(),
+                port: web_app.port,
+                db_name: None,
+                username: String::new(),
+                status: web_app.status.clone(),
+                created_at: web_app.created_at.clone(),
+                project_id: web_app.project_id.clone(),
+            };
+            Ok((synthetic, "web_app".to_string()))
+        }
+        _ => {
+            let inst = find_instance(app, target_id)?;
+            Ok((inst, "instance".to_string()))
+        }
     }
 }
 
@@ -226,6 +284,29 @@ fn find_binary(name: &str) -> Option<String> {
         Some(p.to_string_lossy().into_owned())
     } else {
         None
+    }
+}
+
+fn ngrok_download_url() -> (&'static str, &'static str, &'static str) {
+    // Returns (zip_url, zip_filename, binary_filename)
+    if cfg!(target_os = "windows") {
+        (
+            "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip",
+            "ngrok.zip",
+            "ngrok.exe",
+        )
+    } else if cfg!(target_os = "macos") {
+        (
+            "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip",
+            "ngrok.zip",
+            "ngrok",
+        )
+    } else {
+        (
+            "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.zip",
+            "ngrok.zip",
+            "ngrok",
+        )
     }
 }
 
@@ -369,7 +450,8 @@ pub async fn check_tool_available(tool: String) -> Result<ToolStatus, String> {
     let available = path.is_some();
     let download_url = match tool.as_str() {
         "cloudflared" => Some(cloudflared_download_url().0.to_string()),
-        "ngrok" => Some("https://ngrok.com/download".to_string()),
+        "ngrok" => Some(ngrok_download_url().0.to_string()),
+        "lt" => Some("https://github.com/localtunnel/localtunnel#readme".to_string()),
         _ => None,
     };
     Ok(ToolStatus {
@@ -396,6 +478,123 @@ pub async fn download_and_install_tool(app: AppHandle, tool: String) -> Result<S
             }
             Ok(dest.to_string_lossy().into_owned())
         }
+        "ngrok" => {
+            let (url, zip_filename, binary_name) = ngrok_download_url();
+            let bin_dir = app_bin_dir()?;
+            let temp_dir = std::env::temp_dir().join(format!("bp_ngrok_{}", uuid_v4()));
+            std::fs::create_dir_all(&temp_dir)
+                .map_err(|e| format!("Failed to create temp directory: {e}"))?;
+            let zip_path = temp_dir.join(zip_filename);
+
+            // Download the zip with progress events
+            if let Err(e) = download_file_with_progress(&app, "ngrok", url, &zip_path).await {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                return Err(e);
+            }
+
+            let zip_str = zip_path.to_string_lossy().to_string();
+            let bin_str = bin_dir.to_string_lossy().to_string();
+            let dest = bin_dir.join(binary_name);
+
+            // Extract the zip — PowerShell on Windows, unzip on macOS/Linux
+            let extract_result: Result<(), String> = if cfg!(target_os = "windows") {
+                TokioCommand::new("powershell")
+                    .args([
+                        "-NoProfile", "-NonInteractive", "-Command",
+                        &format!("Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+                            zip_str, bin_str),
+                    ])
+                    .output()
+                    .await
+                    .map_err(|e| format!("PowerShell extraction failed to launch: {e}"))
+                    .and_then(|out| {
+                        if out.status.success() { Ok(()) }
+                        else { Err(format!("Extraction failed: {}",
+                            String::from_utf8_lossy(&out.stderr).trim())) }
+                    })
+            } else {
+                TokioCommand::new("unzip")
+                    .args(["-o", &zip_str, "-d", &bin_str])
+                    .output()
+                    .await
+                    .map_err(|e| format!("unzip failed to launch: {e}"))
+                    .and_then(|out| {
+                        if out.status.success() { Ok(()) }
+                        else { Err(format!("Extraction failed: {}",
+                            String::from_utf8_lossy(&out.stderr).trim())) }
+                    })
+            };
+
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            extract_result?;
+
+            // Mark executable on non-Windows
+            #[cfg(not(target_os = "windows"))]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+                    .map_err(|e| format!("Failed to set executable bit: {e}"))?;
+            }
+
+            Ok(dest.to_string_lossy().into_owned())
+        }
+        "lt" => {
+            // localtunnel is an npm package — install it globally via npm.
+            let _ = app.emit(
+                "tool-download-progress",
+                DownloadProgress {
+                    tool: "lt".to_string(),
+                    downloaded: 0,
+                    phase: "downloading".into(),
+                    message: "Running npm install -g localtunnel…".into(),
+                },
+            );
+            let out = if cfg!(target_os = "windows") {
+                TokioCommand::new("cmd")
+                    .args(["/C", "npm", "install", "-g", "localtunnel"])
+                    .output()
+                    .await
+            } else {
+                TokioCommand::new("npm")
+                    .args(["install", "-g", "localtunnel"])
+                    .output()
+                    .await
+            };
+            match out {
+                Ok(o) if o.status.success() => {
+                    let _ = app.emit(
+                        "tool-download-progress",
+                        DownloadProgress {
+                            tool: "lt".to_string(),
+                            downloaded: 0,
+                            phase: "complete".into(),
+                            message: "localtunnel installed successfully.".into(),
+                        },
+                    );
+                    Ok("lt".to_string())
+                }
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                    let _ = app.emit(
+                        "tool-download-progress",
+                        DownloadProgress {
+                            tool: "lt".to_string(),
+                            downloaded: 0,
+                            phase: "error".into(),
+                            message: stderr.clone(),
+                        },
+                    );
+                    Err(format!(
+                        "npm install -g localtunnel failed:\n{stderr}\n\
+                         Make sure Node.js and npm are installed: https://nodejs.org"
+                    ))
+                }
+                Err(e) => Err(format!(
+                    "Failed to run npm: {e}\n\
+                     Make sure Node.js and npm are installed: https://nodejs.org"
+                )),
+            }
+        }
         _ => Err(format!(
             "{tool} must be installed manually — visit the download page for your OS."
         )),
@@ -407,6 +606,45 @@ pub struct FirewallResult {
     pub success: bool,
     pub message: String,
     pub manual_command: Option<String>,
+}
+
+/// Attempt to discover this machine's public internet IP by querying a
+/// lightweight plain-text endpoint via `curl` (available on Windows 10+,
+/// macOS, and Linux). Returns `None` if the request fails or curl is absent.
+#[tauri::command]
+pub fn get_public_ip() -> Option<String> {
+    // Try multiple providers so a single outage doesn't break detection.
+    let providers = [
+        "https://api.ipify.org",
+        "https://checkip.amazonaws.com",
+        "https://icanhazip.com",
+    ];
+    for url in providers {
+        let result = if cfg!(target_os = "windows") {
+            Command::new("curl")
+                .args(["--silent", "--max-time", "4", "--ipv4", url])
+                .output()
+        } else {
+            Command::new("curl")
+                .args(["-s", "--max-time", "4", "-4", url])
+                .output()
+        };
+        if let Ok(out) = result {
+            if out.status.success() {
+                let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                // Strict IP-shape check: must parse as a valid IPv4 or IPv6
+                // address. Rejects anything else (HTML error pages, captive
+                // portals, malformed responses).
+                if !ip.is_empty()
+                    && ip.len() <= 45
+                    && ip.parse::<std::net::IpAddr>().is_ok()
+                {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[tauri::command]
@@ -594,7 +832,7 @@ pub(crate) async fn teardown_exposures_for_instance(app: &AppHandle, instance_id
         // Stop the process/container — ignore errors (already stopped, etc.).
         let _ = match exposure.method.as_str() {
             "direct" => teardown_direct(app, &exposure).await,
-            "ngrok" | "cloudflare" => teardown_child(app, &exposure).await,
+            "ngrok" | "cloudflare" | "localtunnel" => teardown_child(app, &exposure).await,
             "nginx" => teardown_nginx(app, &exposure).await,
             _ => Ok(()),
         };
@@ -846,6 +1084,57 @@ fn preview_nginx(req: &ExposureRequest, instance: &LocalInstance) -> ExposurePre
     }
 }
 
+fn preview_localtunnel(req: &ExposureRequest, instance: &LocalInstance) -> ExposurePreview {
+    let subdomain = req.lt_subdomain.as_deref().unwrap_or("").trim().to_string();
+    let expected_url = if !subdomain.is_empty() {
+        Some(format!("https://{subdomain}.loca.lt"))
+    } else {
+        None
+    };
+    ExposurePreview {
+        method: "localtunnel".into(),
+        steps: vec![
+            ExposureStep {
+                step: 1,
+                title: "Check that lt is installed".into(),
+                description:
+                    "We'll look for the localtunnel CLI (lt) on your system. If it isn't \
+                     installed, you'll be prompted to install it via npm."
+                        .into(),
+                kind: "action".into(),
+            },
+            ExposureStep {
+                step: 2,
+                title: "Start a localtunnel HTTPS tunnel".into(),
+                description: format!(
+                    "A background lt process will create a public HTTPS URL pointing at your \
+                     \"{}\" service on port {}. No account or auth token needed.",
+                    instance.name, instance.port
+                ),
+                kind: "action".into(),
+            },
+            ExposureStep {
+                step: 3,
+                title: "Capture the public URL".into(),
+                description:
+                    "We'll watch lt's output for the loca.lt address and save it as the \
+                     public endpoint for this exposure."
+                        .into(),
+                kind: "info".into(),
+            },
+        ],
+        expected_endpoint: expected_url,
+        warnings: vec![
+            "localtunnel is HTTP/HTTPS only — it will not forward raw database protocols \
+             (PostgreSQL, MySQL, MongoDB, Redis). For those, use ngrok or direct exposure."
+                .into(),
+            "The loca.lt URL is temporary and changes on every restart. Subdomains are not \
+             reserved — another user may already hold the same name."
+                .into(),
+        ],
+    }
+}
+
 // ── Public commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -854,7 +1143,8 @@ pub async fn preview_exposure(
     request: ExposureRequest,
 ) -> Result<ExposurePreview, String> {
     validate_method(&request.method)?;
-    let instance = find_instance(&app, &request.instance_id)?;
+    let target_type = request.target_type.as_deref().unwrap_or("instance");
+    let (instance, _) = resolve_target(&app, target_type, &request.instance_id, &request.method)?;
     if let Some(p) = request.external_port {
         if p < 1 {
             return Err("External port must be greater than 0.".into());
@@ -865,6 +1155,7 @@ pub async fn preview_exposure(
         "cloudflare" => preview_cloudflare(&request, &instance),
         "ngrok" => preview_ngrok(&request, &instance),
         "nginx" => preview_nginx(&request, &instance),
+        "localtunnel" => preview_localtunnel(&request, &instance),
         _ => unreachable!(),
     };
     Ok(preview)
@@ -881,7 +1172,9 @@ pub async fn create_exposure(
     request: ExposureRequest,
 ) -> Result<Exposure, String> {
     validate_method(&request.method)?;
-    let instance = find_instance(&app, &request.instance_id)?;
+    let target_type_str = request.target_type.as_deref().unwrap_or("instance");
+    let (instance, resolved_target_type) =
+        resolve_target(&app, target_type_str, &request.instance_id, &request.method)?;
     check_active_exposure(&app, &request.instance_id, &request.method)?;
 
     let result = match request.method.as_str() {
@@ -889,7 +1182,21 @@ pub async fn create_exposure(
         "ngrok" => create_ngrok(&app, &request, &instance).await,
         "cloudflare" => create_cloudflare(&app, &request, &instance).await,
         "nginx" => create_nginx(&app, &request, &instance).await,
+        "localtunnel" => create_localtunnel(&app, &request, &instance).await,
         _ => unreachable!(),
+    };
+
+    // Stamp the resolved target_type onto the saved exposure so the UI can
+    // distinguish web-app exposures from instance exposures.
+    let result = match result {
+        Ok(mut exposure) => {
+            if exposure.target_type != resolved_target_type {
+                exposure.target_type = resolved_target_type.clone();
+                let _ = save_exposure(&app, &exposure);
+            }
+            Ok(exposure)
+        }
+        Err(e) => Err(e),
     };
 
     match &result {
@@ -930,6 +1237,7 @@ pub async fn remove_exposure(app: AppHandle, exposure_id: String) -> Result<(), 
         "direct" => teardown_direct(&app, &exposure).await,
         "ngrok" => teardown_child(&app, &exposure).await,
         "cloudflare" => teardown_child(&app, &exposure).await,
+        "localtunnel" => teardown_child(&app, &exposure).await,
         "nginx" => teardown_nginx(&app, &exposure).await,
         _ => Ok(()),
     };
@@ -1126,7 +1434,7 @@ async fn spawn_cloudflare_tunnel(
     app: &AppHandle,
     exposure_id: &str,
     instance: &LocalInstance,
-) -> Result<String, String> {
+) -> Result<(String, u32), String> {
     let cloudflared_bin = find_binary("cloudflared").ok_or_else(|| {
         "cloudflared is not installed. Use the Install button in the wizard to download it \
          automatically, or visit https://github.com/cloudflare/cloudflared/releases"
@@ -1142,6 +1450,8 @@ async fn spawn_cloudflare_tunnel(
         .spawn()
         .map_err(|e| format!("Failed to launch cloudflared: {e}"))?;
 
+    let pid = child.id();
+
     // Read stderr (cloudflared prints the public URL to stderr) for up to 20s.
     let public_url = read_url_from_child_stderr(&mut child, "trycloudflare.com", 20).await;
 
@@ -1153,7 +1463,7 @@ async fn spawn_cloudflare_tunnel(
                 .lock()
                 .unwrap()
                 .insert(exposure_id.to_string(), child);
-            Ok(url)
+            Ok((url, pid))
         }
         None => {
             let _ = child.kill();
@@ -1173,7 +1483,7 @@ async fn create_cloudflare(
 ) -> Result<Exposure, String> {
     let exposure_id = format!("expose_{}", uuid_v4());
 
-    let public_url = spawn_cloudflare_tunnel(app, &exposure_id, instance).await?;
+    let (public_url, pid) = spawn_cloudflare_tunnel(app, &exposure_id, instance).await?;
 
     let exposure = Exposure {
         id: exposure_id,
@@ -1183,7 +1493,7 @@ async fn create_cloudflare(
         external_endpoint: Some(public_url),
         external_port: None,
         provider_id: None,
-        pid: None,
+        pid: Some(pid),
         hostname: None,
         error: None,
         firewall_rule_name: None,
@@ -1221,12 +1531,18 @@ pub(crate) async fn reprovision_cloudflare_exposures_inner(
             Err(_) => continue,
         };
 
+        // Don't reprovision tunnels for instances that aren't running.
+        if instance.status != "running" {
+            continue;
+        }
+
         match spawn_cloudflare_tunnel(app, &exposure.id, &instance).await {
-            Ok(endpoint) => {
+            Ok((endpoint, pid)) => {
                 let mut store = load_store(app);
                 if let Some(exp) = store.exposures.iter_mut().find(|e| e.id == exposure.id) {
                     exp.status = "active".to_string();
                     exp.external_endpoint = Some(endpoint.clone());
+                    exp.pid = Some(pid);
                     exp.error = None;
                     exp.updated_at = now();
                 }
@@ -1291,11 +1607,12 @@ pub async fn regenerate_cloudflare_exposure(
 
     // Spawn a fresh tunnel.
     match spawn_cloudflare_tunnel(&app, &exposure_id, &instance).await {
-        Ok(endpoint) => {
+        Ok((endpoint, pid)) => {
             let mut store = load_store(&app);
             if let Some(exp) = store.exposures.iter_mut().find(|e| e.id == exposure_id) {
                 exp.status = "active".to_string();
                 exp.external_endpoint = Some(endpoint.clone());
+                exp.pid = Some(pid);
                 exp.error = None;
                 exp.updated_at = now();
             }
@@ -1345,27 +1662,84 @@ async fn create_ngrok(
         .flatten()
         .ok_or("No ngrok auth token saved. Provide one to start the tunnel.")?;
 
+    // Step 1: Register the auth token with ngrok's config file.
+    // ngrok v3 requires this step — passing the token only via env var is unreliable because
+    // ngrok writes authentication state to %APPDATA%\ngrok\ngrok.yml (Windows) before opening
+    // any tunnel. Without this, 'ngrok tcp' starts but stays unauthenticated indefinitely.
+    let auth_out = TokioCommand::new(&ngrok_bin)
+        .args(["config", "add-authtoken", &token])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run 'ngrok config add-authtoken': {e}"))?;
+    if !auth_out.status.success() {
+        let err = String::from_utf8_lossy(&auth_out.stderr);
+        return Err(format!(
+            "ngrok auth token registration failed: {err}\n\
+             Ensure your token is correct (copy it from https://dashboard.ngrok.com/get-started/your-authtoken)."
+        ));
+    }
+
     let exposure_id = format!("expose_{}", uuid_v4());
     let port_str = instance.port.to_string();
 
+    // Step 2: Kill any leftover ngrok process from a previous failed attempt so
+    // port 4040 (ngrok's local web API) is guaranteed free for the new process.
+    #[cfg(target_os = "windows")]
+    let _ = TokioCommand::new("taskkill")
+        .args(["/F", "/IM", "ngrok.exe"])
+        .output()
+        .await;
+    #[cfg(not(target_os = "windows"))]
+    let _ = TokioCommand::new("pkill")
+        .args(["-f", "ngrok tcp"])
+        .output()
+        .await;
+    // Brief pause so the OS fully releases the port before we rebind.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Step 3: Launch the tunnel — redirect stderr to a temp file so we can
+    // read the crash reason if ngrok exits before opening a tunnel.
+    let stderr_log = std::env::temp_dir().join(format!("ngrok_err_{}.txt", uuid_v4()));
+    let stderr_file = std::fs::File::create(&stderr_log)
+        .map_err(|e| format!("Failed to create ngrok stderr capture file: {e}"))?;
+
     let mut child = Command::new(&ngrok_bin)
-        .args([
-            "tcp",
-            &port_str,
-            "--authtoken",
-            &token,
-            "--log=stdout",
-            "--log-format=json",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .args(["tcp", &port_str])
+        .stdout(Stdio::null())
+        .stderr(stderr_file)
         .spawn()
         .map_err(|e| format!("Failed to launch ngrok: {e}"))?;
 
     let pid = child.id();
 
-    // Poll ngrok's local API for the assigned tunnel URL
-    let endpoint = poll_ngrok_api(20).await;
+    // Give ngrok time to connect and bind its local web API port.
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+    // Quick early-exit check: if ngrok already died we can report the stderr
+    // immediately instead of waiting 30 more seconds.
+    if let Ok(Some(status)) = child.try_wait() {
+        let stderr_text = std::fs::read_to_string(&stderr_log).unwrap_or_default();
+        let _ = std::fs::remove_file(&stderr_log);
+        let hint = if stderr_text.contains("ERR_NGROK_105") || stderr_text.contains("account") {
+            "\nHint: ERR_NGROK_105 means the auth token is invalid or unrecognised — \
+             copy it fresh from https://dashboard.ngrok.com/get-started/your-authtoken"
+        } else if stderr_text.contains("bind") || stderr_text.contains("4040") {
+            "\nHint: port 4040 may still be in use — wait a moment and try again."
+        } else {
+            ""
+        };
+        return Err(format!(
+            "ngrok exited immediately ({}). stderr:\n{}{hint}",
+            status,
+            if stderr_text.is_empty() { "(no output)" } else { stderr_text.trim() }
+        ));
+    }
+
+    // Step 4: Poll the local web API until a tunnel URL appears.
+    let endpoint = poll_ngrok_api(30).await;
+    let stderr_text = std::fs::read_to_string(&stderr_log).unwrap_or_default();
+    let _ = std::fs::remove_file(&stderr_log);
+
     match endpoint {
         Some(url) => {
             let state = app.state::<crate::AppState>();
@@ -1396,7 +1770,163 @@ async fn create_ngrok(
         }
         None => {
             let _ = child.kill();
-            Err("ngrok started but didn't report a public URL within 20s.".into())
+            let diag = diagnose_ngrok_api().await;
+            let stderr_info = if stderr_text.is_empty() {
+                String::new()
+            } else {
+                format!("\nngrok output:\n{}", stderr_text.trim())
+            };
+            Err(format!(
+                "ngrok did not report a public URL within 30s.\n{diag}{stderr_info}"
+            ))
+        }
+    }
+}
+
+// ── localtunnel ──────────────────────────────────────────────────────────
+
+/// Read lines from a child process's stdout until a line containing `needle`
+/// (as part of an HTTPS URL) is found, or the timeout elapses.
+/// localtunnel prints `your url is: https://random.loca.lt` to stdout.
+async fn read_url_from_child_stdout(
+    child: &mut std::process::Child,
+    needle: &str,
+    timeout_secs: u64,
+) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    use std::time::Instant;
+    use tokio::time::{sleep, Duration};
+
+    let stdout = child.stdout.take()?;
+    let mut reader = BufReader::new(stdout);
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+
+    let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    let _ = tx.send(None);
+                    return;
+                }
+                Ok(_) => {
+                    if tx.send(Some(line.clone())).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(None);
+                    return;
+                }
+            }
+        }
+    });
+
+    while Instant::now() < deadline {
+        match rx.try_recv() {
+            Ok(Some(line)) => {
+                if let Some(url) = extract_url_with(&line, needle) {
+                    return Some(url);
+                }
+            }
+            Ok(None) => return None,
+            Err(_) => {
+                sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+    None
+}
+
+async fn create_localtunnel(
+    app: &AppHandle,
+    req: &ExposureRequest,
+    instance: &LocalInstance,
+) -> Result<Exposure, String> {
+    // Validate subdomain — prevent any command injection.
+    let subdomain = req.lt_subdomain.as_deref().unwrap_or("").trim().to_string();
+    if !subdomain.is_empty()
+        && !subdomain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("Subdomain must contain only letters, numbers, and hyphens.".into());
+    }
+
+    let exposure_id = format!("expose_{}", uuid_v4());
+    let port_str = instance.port.to_string();
+
+    let mut args: Vec<String> = vec!["--port".to_string(), port_str];
+    if !subdomain.is_empty() {
+        args.push("--subdomain".to_string());
+        args.push(subdomain.clone());
+    }
+
+    // On Windows, `npm install -g localtunnel` places `lt.cmd` in the npm
+    // global bin directory. .cmd files require `cmd /C` to execute.
+    let mut child = if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .arg("/C")
+            .arg("lt")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+    } else {
+        Command::new("lt")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+    }
+    .map_err(|e| {
+        format!(
+            "Failed to launch localtunnel (lt): {e}\n\
+             Install it with: npm install -g localtunnel"
+        )
+    })?;
+
+    let pid = child.id();
+
+    // lt prints the URL to stdout: "your url is: https://random.loca.lt"
+    let public_url = read_url_from_child_stdout(&mut child, "loca.lt", 30).await;
+
+    match public_url {
+        Some(url) => {
+            let state = app.state::<crate::AppState>();
+            state
+                .exposure_children
+                .lock()
+                .unwrap()
+                .insert(exposure_id.clone(), child);
+            let exposure = Exposure {
+                id: exposure_id,
+                instance_id: instance.id.clone(),
+                method: "localtunnel".into(),
+                status: "active".into(),
+                external_endpoint: Some(url),
+                external_port: None,
+                provider_id: None,
+                pid: Some(pid),
+                hostname: None,
+                error: None,
+                firewall_rule_name: None,
+                target_type: "instance".to_string(),
+                created_at: now(),
+                updated_at: now(),
+            };
+            save_exposure(app, &exposure)?;
+            Ok(exposure)
+        }
+        None => {
+            let _ = child.kill();
+            Err(
+                "localtunnel did not return a public URL within 30 seconds. \
+                 Check that localtunnel.me is reachable and the service is running."
+                    .into(),
+            )
         }
     }
 }
@@ -1679,33 +2209,77 @@ fn extract_url_with(line: &str, needle: &str) -> Option<String> {
     Some(tail[..end].trim_end_matches(&['.', ',', ')'][..]).to_string())
 }
 
+/// Called when poll_ngrok_api times out. Hits the local API one more time and
+/// returns a human-readable diagnosis string to include in the error message.
+async fn diagnose_ngrok_api() -> String {
+    let result = TokioCommand::new(if cfg!(target_os = "windows") {
+        "powershell"
+    } else {
+        "curl"
+    })
+    .args(if cfg!(target_os = "windows") {
+        vec![
+            "-NoProfile",
+            "-Command",
+            "try { (Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:4040/api/tunnels).Content } catch { 'API_UNREACHABLE' }",
+        ]
+    } else {
+        vec!["-s", "--max-time", "3", "http://127.0.0.1:4040/api/tunnels"]
+    })
+    .output()
+    .await;
+
+    match result {
+        Ok(out) => {
+            let body = String::from_utf8_lossy(&out.stdout);
+            let body = body.trim();
+            if body.is_empty() || body == "API_UNREACHABLE" {
+                "ngrok API is unreachable — ngrok may have crashed or been blocked by antivirus/firewall.".to_string()
+            } else if body.contains("\"tunnels\":[]") {
+                "ngrok API is reachable but no tunnels exist yet. \
+                 The auth token may be invalid, or the ngrok account may not have TCP tunnel access (requires a free account at https://ngrok.com)."
+                    .to_string()
+            } else if body.contains("ERR_NGROK") {
+                format!("ngrok reported an error: {body}")
+            } else {
+                format!("ngrok API response: {body}")
+            }
+        }
+        Err(_) => "ngrok API is unreachable — ngrok may have crashed or been blocked by antivirus/firewall.".to_string(),
+    }
+}
+
 async fn poll_ngrok_api(max_secs: u64) -> Option<String> {
     use tokio::time::{sleep, Duration};
     for _ in 0..max_secs {
         sleep(Duration::from_secs(1)).await;
-        if let Ok(out) = TokioCommand::new(if cfg!(target_os = "windows") {
-            "powershell"
-        } else {
-            "curl"
-        })
-        .args(if cfg!(target_os = "windows") {
-            vec![
-                "-NoProfile",
-                "-Command",
-                "(Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:4040/api/tunnels).Content",
-            ]
-        } else {
-            vec!["-s", "http://127.0.0.1:4040/api/tunnels"]
-        })
-        .output()
-        .await
-        {
-            if !out.status.success() {
-                continue;
-            }
-            let body = String::from_utf8_lossy(&out.stdout);
-            if let Some(url) = parse_ngrok_public_url(&body) {
-                return Some(url);
+        // ngrok binds 4040 by default; if 4040 is taken it tries 4041, 4042.
+        for port in [4040u16, 4041, 4042] {
+            let api_url = format!("http://127.0.0.1:{port}/api/tunnels");
+            let body_opt: Option<String> = if cfg!(target_os = "windows") {
+                let ps_cmd = format!(
+                    "try {{ (Invoke-WebRequest -UseBasicParsing -Uri '{api_url}').Content }} catch {{ '' }}"
+                );
+                TokioCommand::new("powershell")
+                    .args(["-NoProfile", "-Command", &ps_cmd])
+                    .output()
+                    .await
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            } else {
+                TokioCommand::new("curl")
+                    .args(["-s", &api_url])
+                    .output()
+                    .await
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            };
+            if let Some(body) = body_opt {
+                if let Some(tunnel_url) = parse_ngrok_public_url(&body) {
+                    return Some(tunnel_url);
+                }
             }
         }
     }

@@ -73,6 +73,18 @@ export async function setupPocketbaseSuperuser(
   return invoke("setup_pocketbase_superuser", { instanceId, email, password });
 }
 
+/**
+ * Reset the admin/root password for a running database container.
+ * The app reads the old credential from the keyring automatically.
+ * Supported services: postgres, mysql, mariadb, redis, mongodb, clickhouse.
+ */
+export async function resetInstancePassword(
+  instanceId: string,
+  newPassword: string
+): Promise<void> {
+  return invoke("reset_instance_password", { instanceId, newPassword });
+}
+
 export async function listLocalInstances(): Promise<LocalInstance[]> {
   return invoke<LocalInstance[]>("list_local_instances");
 }
@@ -308,7 +320,7 @@ export async function testRemoteConnection(
 
 // ── Public exposures ───────────────────────────────────────────────────────
 
-export type ExposureMethod = "direct" | "cloudflare" | "ngrok" | "nginx";
+export type ExposureMethod = "direct" | "cloudflare" | "ngrok" | "nginx" | "localtunnel";
 
 export interface ExposureRequest {
   instance_id: string;
@@ -316,6 +328,10 @@ export interface ExposureRequest {
   external_port?: number | null;
   hostname?: string | null;
   ngrok_token?: string | null;
+  /** Optional subdomain for localtunnel, e.g. "myapp" → https://myapp.loca.lt */
+  lt_subdomain?: string | null;
+  /** "instance" (default) or "web_app" */
+  target_type?: string | null;
 }
 
 export interface ExposureStep {
@@ -344,6 +360,8 @@ export interface Exposure {
   pid: number | null;
   hostname: string | null;
   error: string | null;
+  /** "instance" or "web_app" */
+  target_type: string;
   created_at: string;
   updated_at: string;
 }
@@ -396,6 +414,10 @@ export async function addFirewallRule(
   exposureId?: string,
 ): Promise<FirewallResult> {
   return invoke<FirewallResult>("add_firewall_rule", { port, ruleName, exposureId: exposureId ?? null });
+}
+
+export async function getPublicIp(): Promise<string | null> {
+  return invoke<string | null>("get_public_ip");
 }
 
 export async function reprovisionCloudflareExposures(

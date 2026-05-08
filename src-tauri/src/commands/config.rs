@@ -71,12 +71,28 @@ pub fn export_backup(
     }
 
     let src = std::path::PathBuf::from(&record.file_path);
+
+    // Defence-in-depth: backup files are written by us into the app data
+    // directory. Refuse to copy from anywhere else even if the store has been
+    // tampered with, and resolve symlinks before deciding.
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Could not resolve app data directory: {e}"))?;
+    let canonical_src = std::fs::canonicalize(&src)
+        .map_err(|e| format!("Backup file is not accessible: {e}"))?;
+    let canonical_root = std::fs::canonicalize(&app_data)
+        .map_err(|e| format!("App data directory is not accessible: {e}"))?;
+    if !canonical_src.starts_with(&canonical_root) {
+        return Err("Refusing to export a backup file located outside the app data directory.".into());
+    }
+
     let file_name = src
         .file_name()
         .ok_or("Could not determine backup filename.")?;
     let dest_file = dest_dir.join(file_name);
 
-    std::fs::copy(&src, &dest_file)
+    std::fs::copy(&canonical_src, &dest_file)
         .map_err(|e| format!("Copy failed: {e}"))?;
 
     Ok(dest_file.to_string_lossy().into_owned())
