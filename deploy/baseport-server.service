@@ -1,0 +1,35 @@
+# systemd unit for running `baseport-server` directly on a VPS without Docker.
+#
+# Place at /etc/systemd/system/baseport-server.service then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now baseport-server
+#
+# The binary expects its config in /etc/baseport.env (mode 0600, owned by
+# the `baseport` user).
+
+[Unit]
+Description=Baseport — headless web mode
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=baseport
+Group=baseport
+WorkingDirectory=/var/lib/baseport
+EnvironmentFile=/etc/baseport.env
+ExecStart=/usr/local/bin/baseport-server
+Restart=on-failure
+RestartSec=5
+# Hardening — keep the service confined.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/baseport
+# The service speaks HTTP on localhost only; the reverse proxy fronts it.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

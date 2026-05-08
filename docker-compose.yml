@@ -1,0 +1,36 @@
+# Compose file for running Baseport in server (web) mode.
+#
+# Usage:
+#   1. Copy `.env.example` to `.env` and fill in real secrets.
+#   2. Run:   docker compose up -d
+#   3. The HTTP API is exposed on :8473 — point a reverse proxy (nginx/Caddy)
+#      at it and terminate TLS there. See `deploy/nginx.conf` for an example.
+#
+# The container needs access to the host Docker socket so Baseport can
+# manage database/web-app containers on the host. This is functionally
+# equivalent to root on the host — only run on a server where that's
+# acceptable.
+
+services:
+  baseport:
+    build: .
+    image: baseport-server:latest
+    container_name: baseport
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8473:8473"   # bind to localhost so only the reverse proxy can reach it
+    environment:
+      BASEPORT_DATA_DIR: /home/baseport/data
+      BASEPORT_PORT: "8473"
+      BASEPORT_SECRET_KEY: ${BASEPORT_SECRET_KEY:?set in .env}
+      BASEPORT_ADMIN_PASSWORD: ${BASEPORT_ADMIN_PASSWORD:?set in .env}
+      BASEPORT_JWT_SECRET: ${BASEPORT_JWT_SECRET:?set in .env}
+      BASEPORT_ALLOWED_ORIGIN: ${BASEPORT_ALLOWED_ORIGIN:-}
+      BASEPORT_TOKEN_EXPIRY_HOURS: ${BASEPORT_TOKEN_EXPIRY_HOURS:-24}
+      RUST_LOG: ${RUST_LOG:-info,tower_http=info}
+    volumes:
+      - baseport-data:/home/baseport/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  baseport-data:

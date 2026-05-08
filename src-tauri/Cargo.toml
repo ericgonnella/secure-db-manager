@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Baseport — local database manager"
 authors = ["you"]
 edition = "2021"
+default-run = "baseport"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -13,6 +14,20 @@ edition = "2021"
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "baseport_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Headless HTTP server binary for VPS / web mode. Shares the same lib as the
+# Tauri desktop binary; both go through `crate::secrets`, `crate::local_store`,
+# and `crate::AppContext`.
+[[bin]]
+name = "baseport-server"
+path = "src/bin/server.rs"
+required-features = ["server"]
+
+[features]
+default = []
+# Enables the Axum HTTP server stack. The desktop Tauri build does NOT need
+# any of these dependencies, so we gate them behind a feature.
+server = ["dep:axum", "dep:tower-http", "dep:tower", "dep:jsonwebtoken", "dep:bcrypt", "dep:aes-gcm", "dep:tokio-stream", "dep:futures", "dep:tracing", "dep:tracing-subscriber"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -26,6 +41,20 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 getrandom = "0.3"
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
-tokio = { version = "1", features = ["time", "net", "process", "rt"] }
+tokio = { version = "1", features = ["time", "net", "process", "rt", "rt-multi-thread", "macros", "sync", "signal"] }
 rcgen = { version = "0.13", features = ["pem"] }
+
+# Server-mode dependencies (gated behind the `server` feature so desktop builds
+# stay lean).
+axum = { version = "0.8", features = ["macros"], optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"], optional = true }
+jsonwebtoken = { version = "9", optional = true }
+bcrypt = { version = "0.16", optional = true }
+aes-gcm = { version = "0.10", optional = true }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+futures = { version = "0.3", optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
 

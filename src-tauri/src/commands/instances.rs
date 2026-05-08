@@ -6,9 +6,14 @@ use std::process::Command;
 use tauri::{AppHandle, Manager};
 use tokio::process::Command as TokioCommand;
 
-// ── Secret storage (OS keyring) ────────────────────────────────────────────
+// ── Secret storage ─────────────────────────────────────────────────────────
+//
+// Thin wrappers over `crate::secrets` kept for backward compatibility with
+// existing call sites (and re-exported for `commands::hosts`). The actual
+// backend (OS keyring on desktop, encrypted file on the server) is selected
+// once at startup via `crate::secrets::configure`.
 
-pub(crate) const KEYRING_SERVICE: &str = "com.ericg.baseport";
+pub(crate) const KEYRING_SERVICE: &str = crate::secrets::KEYRING_SERVICE;
 
 pub(crate) fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYRING_SERVICE, account)
@@ -16,29 +21,20 @@ pub(crate) fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
 }
 
 pub(crate) fn store_password(account: &str, password: &str) -> Result<(), String> {
-    keyring_entry(account)?
-        .set_password(password)
-        .map_err(|e| format!("Failed to save password to keyring: {e}"))
+    crate::secrets::store(account, password)
 }
 
 pub(crate) fn read_password(account: &str) -> Result<String, String> {
-    read_password_opt(account)?.ok_or_else(|| "CREDENTIAL_NOT_FOUND".to_string())
+    crate::secrets::read(account)
 }
 
-/// Returns `None` when no credential is stored, `Err` only on real keyring failures.
+/// Returns `None` when no credential is stored, `Err` only on real backend failures.
 pub(crate) fn read_password_opt(account: &str) -> Result<Option<String>, String> {
-    match keyring_entry(account)?.get_password() {
-        Ok(pw) => Ok(Some(pw)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("Failed to read password from keyring: {e}")),
-    }
+    crate::secrets::read_opt(account)
 }
 
 pub(crate) fn forget_password(account: &str) {
-    if let Ok(entry) = keyring_entry(account) {
-        // Best-effort delete; ignore errors (entry may not exist)
-        let _ = entry.delete_credential();
-    }
+    crate::secrets::forget(account);
 }
 
 /// Build the connection URI for a service from its stored fields + password.

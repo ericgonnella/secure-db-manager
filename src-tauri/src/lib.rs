@@ -1,26 +1,42 @@
+mod app_context;
 mod commands;
+mod event_emitter;
 mod local_store;
+pub mod secrets;
+
+#[cfg(feature = "server")]
+pub mod server;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use commands::docker::DockerMode;
+
+pub use app_context::AppContext;
 
 /// Global app state shared across all Tauri commands.
 /// Tracks the detected Docker execution mode so provisioning
 /// commands know whether to run `docker ...` or `wsl docker ...`.
+///
+/// Fields are wrapped in `Arc<Mutex<_>>` so they can be borrowed cheaply by
+/// `AppContext` (which is also used by the headless `baseport-server` HTTP
+/// binary).
 pub struct AppState {
-    pub docker_mode: Mutex<DockerMode>,
+    pub docker_mode: Arc<Mutex<DockerMode>>,
     /// Long-running child processes (cloudflared, ngrok) keyed by exposure id.
     /// Stored as raw Child handles so we can kill them on teardown.
-    pub exposure_children: Mutex<HashMap<String, std::process::Child>>,
+    pub exposure_children: Arc<Mutex<HashMap<String, std::process::Child>>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Desktop mode uses the OS keyring for secrets; the HTTP server binary
+    // configures an encrypted-file backend instead at startup.
+    secrets::configure(secrets::SecretBackend::Keyring);
+
     tauri::Builder::default()
         .manage(AppState {
-            docker_mode: Mutex::new(DockerMode::None),
-            exposure_children: Mutex::new(HashMap::new()),
+            docker_mode: Arc::new(Mutex::new(DockerMode::None)),
+            exposure_children: Arc::new(Mutex::new(HashMap::new())),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

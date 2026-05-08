@@ -5,6 +5,8 @@ import {
 } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell } from "./components/app-shell";
+import { AuthGuard } from "./components/auth-guard";
+import { AuthProvider } from "./lib/auth-context";
 import { ProjectProvider } from "./lib/projects";
 import { DashboardPage } from "./routes/dashboard";
 import { LocalInstancesPage } from "./routes/local-instances";
@@ -32,8 +34,10 @@ initSettings();
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <ProjectProvider>
-      <BrowserRouter>
+      <AuthProvider>
+        <AuthGuard>
+          <ProjectProvider>
+            <BrowserRouter>
         <Routes>
           <Route element={<AppShell />}>
             <Route index element={<DashboardPage />} />
@@ -71,8 +75,10 @@ export default function App() {
             />
           </Route>
         </Routes>
-      </BrowserRouter>
-      </ProjectProvider>
+            </BrowserRouter>
+          </ProjectProvider>
+        </AuthGuard>
+      </AuthProvider>
     </QueryClientProvider>
   );
 }
