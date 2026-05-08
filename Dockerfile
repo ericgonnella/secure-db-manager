@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Copy lockfile + manifest first to maximise Docker layer cache hits.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN corepack enable && corepack prepare pnpm@latest --activate \
+RUN corepack enable && corepack prepare pnpm@10.13.1 --activate \
  && pnpm install --frozen-lockfile
 
 # Copy the rest of the frontend sources and build.
