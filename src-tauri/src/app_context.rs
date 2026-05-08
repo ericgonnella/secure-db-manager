@@ -8,7 +8,7 @@
 //! The struct holds only `Arc`-wrapped handles so cloning it is cheap — Axum
 //! handlers receive a fresh clone for every request.
 
-use crate::commands::docker::DockerMode;
+use crate::types::DockerMode;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -42,6 +42,7 @@ impl AppContext {
 /// Build an `AppContext` from a Tauri `AppHandle`. We share the same `Arc`s
 /// that live inside the Tauri-managed `AppState` so both code paths see the
 /// same Docker-mode cache and child-process registry.
+#[cfg(feature = "desktop")]
 impl From<&tauri::AppHandle> for AppContext {
     fn from(app: &tauri::AppHandle) -> Self {
         use tauri::Manager;

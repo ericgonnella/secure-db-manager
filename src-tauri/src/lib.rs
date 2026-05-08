@@ -1,17 +1,24 @@
 mod app_context;
-mod commands;
-mod event_emitter;
 mod local_store;
+mod types;
 pub mod secrets;
+
+#[cfg(feature = "desktop")]
+mod commands;
+#[cfg(feature = "desktop")]
+mod event_emitter;
 
 #[cfg(feature = "server")]
 pub mod server;
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use commands::docker::DockerMode;
-
 pub use app_context::AppContext;
+
+#[cfg(feature = "desktop")]
+use std::collections::HashMap;
+#[cfg(feature = "desktop")]
+use std::sync::{Arc, Mutex};
+#[cfg(feature = "desktop")]
+use types::DockerMode;
 
 /// Global app state shared across all Tauri commands.
 /// Tracks the detected Docker execution mode so provisioning
@@ -20,6 +27,7 @@ pub use app_context::AppContext;
 /// Fields are wrapped in `Arc<Mutex<_>>` so they can be borrowed cheaply by
 /// `AppContext` (which is also used by the headless `baseport-server` HTTP
 /// binary).
+#[cfg(feature = "desktop")]
 pub struct AppState {
     pub docker_mode: Arc<Mutex<DockerMode>>,
     /// Long-running child processes (cloudflared, ngrok) keyed by exposure id.
@@ -27,6 +35,7 @@ pub struct AppState {
     pub exposure_children: Arc<Mutex<HashMap<String, std::process::Child>>>,
 }
 
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Desktop mode uses the OS keyring for secrets; the HTTP server binary

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "desktop")]
 use tauri::Manager;
 
 // ── Data types ─────────────────────────────────────────────────────────────
@@ -185,6 +186,7 @@ pub fn append_audit_event_at(data_dir: &Path, event: AuditEvent) {
 }
 
 /// Backward-compatible wrapper for existing Tauri command call-sites.
+#[cfg(feature = "desktop")]
 pub fn append_audit_event(app_handle: &tauri::AppHandle, event: AuditEvent) {
     append_audit_event_at(&resolve_data_dir(app_handle), event);
 }
@@ -194,6 +196,7 @@ pub fn append_audit_event(app_handle: &tauri::AppHandle, event: AuditEvent) {
 /// Resolve the per-mode data directory for a Tauri `AppHandle`. The HTTP
 /// server constructs its data dir from the `BASEPORT_DATA_DIR` env var and
 /// goes straight to the `_at` variants instead.
+#[cfg(feature = "desktop")]
 fn resolve_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
     let path = app_handle
         .path()
@@ -208,6 +211,7 @@ fn store_path_at(data_dir: &Path) -> PathBuf {
     data_dir.join("local_store.json")
 }
 
+#[cfg(feature = "desktop")]
 fn store_path(app_handle: &tauri::AppHandle) -> PathBuf {
     store_path_at(&resolve_data_dir(app_handle))
 }
@@ -230,16 +234,19 @@ pub fn save_store_at(data_dir: &Path, store: &LocalStore) -> Result<(), String> 
 }
 
 /// Backward-compatible wrapper for existing Tauri command call-sites.
+#[cfg(feature = "desktop")]
 pub fn load_store(app_handle: &tauri::AppHandle) -> LocalStore {
     load_store_at(&resolve_data_dir(app_handle))
 }
 
 /// Backward-compatible wrapper for existing Tauri command call-sites.
+#[cfg(feature = "desktop")]
 pub fn save_store(app_handle: &tauri::AppHandle, store: &LocalStore) -> Result<(), String> {
     save_store_at(&resolve_data_dir(app_handle), store)
 }
 
 // Re-export for callers that want the resolved store path (rare).
+#[cfg(feature = "desktop")]
 #[allow(dead_code)]
 pub fn store_path_for(app_handle: &tauri::AppHandle) -> PathBuf {
     store_path(app_handle)

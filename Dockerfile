@@ -30,7 +30,7 @@ COPY src-tauri ./src-tauri
 # We only need the `baseport-server` binary. The Tauri lib still gets compiled
 # (it's the same crate) — that's fine, it's the source of all shared types.
 WORKDIR /build/src-tauri
-RUN cargo build --release --bin baseport-server --features server
+RUN cargo build --release --no-default-features --bin baseport-server --features server
 
 # ── Stage 3: minimal runtime image ─────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime

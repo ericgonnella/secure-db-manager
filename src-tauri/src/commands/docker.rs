@@ -1,16 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
-#[serde(rename_all = "snake_case")]
-pub enum DockerMode {
-    /// docker CLI is in PATH (Docker Desktop or native Linux/macOS install)
-    Native,
-    /// docker is only available via WSL2 (no Docker Desktop required)
-    Wsl2,
-    /// Docker not found anywhere
-    None,
-}
+// DockerMode is defined in crate::types (always compiled, no Tauri dep)
+pub use crate::types::DockerMode;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SetupStep {
